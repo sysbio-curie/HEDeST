@@ -69,8 +69,9 @@ class CacheManager:
     # Bump when the on-disk cache stops meaning what it used to -- a changed
     # format, but also a changed *definition*. The key records `mask_mode` as a
     # string, so reworking the logic behind a mode name silently serves the old
-    # grid unless this is bumped (v3: mask_mode='spots' reworked).
-    _CACHE_VERSION = "v3"
+    # grid unless this is bumped (v3: mask_mode='spots' reworked; v4: the seed
+    # and the proportions themselves entered the key, see below).
+    _CACHE_VERSION = "v4"
 
     def __init__(self, base_dir="~/.panospace_cache"):
         self.base_dir = os.path.expanduser(base_dir)
@@ -384,7 +385,21 @@ class DINOv2NeighborClassifier(pl.LightningModule):
         return {"optimizer": opt, "lr_scheduler": sched}
 
 
+def _fingerprint_frame(values, index) -> str:
+    """Stable short hash of a label matrix and its row order."""
+    h = hashlib.sha1()
+    h.update(np.ascontiguousarray(np.asarray(values, dtype=np.float64)).tobytes())
+    h.update("\x00".join(map(str, index)).encode())
+    return h.hexdigest()[:16]
+
+
 class DINOv2_superres_deconv(object):
+    def _proportions_fingerprint(self) -> str:
+        return _fingerprint_frame(
+            self.deconv_adata.obs[self.cell_type_name].to_numpy(),
+            list(self.deconv_adata.obs_names),
+        )
+
     def __init__(
         self,
         deconv_adata,
@@ -399,6 +414,7 @@ class DINOv2_superres_deconv(object):
         mask_mode="largest",
         mask_downscale=1,
         mask_min_spots=1,
+        seed=42,
     ):
 
         self.img_dir = img_dir
@@ -408,6 +424,7 @@ class DINOv2_superres_deconv(object):
         self.mask_mode = mask_mode
         self.mask_downscale = mask_downscale
         self.mask_min_spots = int(mask_min_spots)
+        self._seed = int(seed)
 
         params = {
             "radius": radius,
@@ -432,10 +449,22 @@ class DINOv2_superres_deconv(object):
         self.pretrained_model_name = pretrained_model_name
         self._features = None  # lazy: populated by .features on first access
 
-        ckpt_path = os.path.join(self.path, "superres_model.ckpt")
+        # Two cache identities, because two different things are stored here.
+        # `self.path` holds features.pt: DINOv2 embeddings of the spots and
+        # sub-spots, which depend only on the image and the lattice, so every
+        # level, proportions table and seed of a slide share them.
+        # `self._ckpt_dir` holds the *trained* head and its sr_adata, which do
+        # depend on what they were trained on and with. Keying them together
+        # was wrong in both directions: every seed reused the first seed's
+        # checkpoint, so seeds varied nothing; and two proportion tables sharing
+        # a cell-type list collided, so an EnDecon run could silently reuse the
+        # head trained on ground-truth proportions (6 of 27 runs here).
+        self._ckpt_dir = os.path.join(self.path, f"head_seed{int(seed)}_{self._proportions_fingerprint()}")
+        os.makedirs(self._ckpt_dir, exist_ok=True)
+        ckpt_path = os.path.join(self._ckpt_dir, "superres_model.ckpt")
         if os.path.exists(ckpt_path):
             self._validate_legacy_ckpt(ckpt_path)
-            logger.info("Checkpoint exists in %s, loading from checkpoint...", self.path)
+            logger.info("Checkpoint exists in %s, loading from checkpoint...", self._ckpt_dir)
             logger.info("If using checkpoint, run_train method will be skipped.")
             logger.info("If you want to retrain, please delete the checkpoint file first.")
             self.train = False
@@ -456,11 +485,11 @@ class DINOv2_superres_deconv(object):
             )
         logger.info("Model loaded...")
         logger.info("Loading super-res data")
-        if not os.path.exists(os.path.join(self.path, "sr_adata.h5ad")):
+        if not os.path.exists(os.path.join(self._ckpt_dir, "sr_adata.h5ad")):
             self.sr_adata = self.make_sr_datalist()
-            self.sr_adata.write(os.path.join(self.path, "sr_adata.h5ad"))
+            self.sr_adata.write(os.path.join(self._ckpt_dir, "sr_adata.h5ad"))
         else:
-            self.sr_adata = sc.read(os.path.join(self.path, "sr_adata.h5ad"))
+            self.sr_adata = sc.read(os.path.join(self._ckpt_dir, "sr_adata.h5ad"))
 
     @staticmethod
     def _validate_legacy_ckpt(ckpt_path: str):
@@ -803,7 +832,7 @@ class DINOv2_superres_deconv(object):
                 save_top_k=1,
                 mode="min",
                 filename="superres-{epoch:02d}-{val_loss:.3f}",
-                dirpath=self.path,
+                dirpath=self._ckpt_dir,
             )
             callbacks = [
                 EarlyStopping(monitor="val_loss", patience=patience, mode="min"),
@@ -834,7 +863,7 @@ class DINOv2_superres_deconv(object):
             if best and os.path.exists(best):
                 best_state = torch.load(best, map_location="cpu", weights_only=False)["state_dict"]
                 self.model.load_state_dict(best_state)
-        trainer.save_checkpoint(os.path.join(self.path, "superres_model.ckpt"))
+        trainer.save_checkpoint(os.path.join(self._ckpt_dir, "superres_model.ckpt"))
         self.train = False
 
     def run_superres(

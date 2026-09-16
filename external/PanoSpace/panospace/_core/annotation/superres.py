@@ -51,6 +51,7 @@ def superres_core(
         mask_mode=mask_mode,
         mask_downscale=mask_downscale,
         mask_min_spots=mask_min_spots,
+        seed=seed,
     )
 
     if sr_inferencer.train:
