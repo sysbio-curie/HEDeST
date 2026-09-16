@@ -311,24 +311,19 @@ Two checks back this up.
 and cropping it straight from the whole-slide image agree to a median 2.3/255
 per pixel, against 17.5/255 when the box is deliberately shifted by 3 px.
 
-*The model sees exactly what upstream would have fed it.*
-`scripts/test_dataset_equivalence.py` writes the same tiles to disk in the
-layout `TileBatchDataset` expects, runs both datasets over them and compares
-every field elementwise:
+*The model sees exactly what upstream would have fed it.* Before this adapter was
+accepted, the same tiles were written to disk in the layout `TileBatchDataset`
+expects and both datasets were run over them, with augmentation disabled on each
+side. Every field was compared elementwise:
 
 ```
-$ python scripts/test_dataset_equivalence.py --he ... --st ... --seg-dict ...
-compared 24 tiles from he.tiff
-  max |adapter - upstream|  tissue       0.000e+00
-  max |adapter - upstream|  image        0.000e+00
-  max |adapter - upstream|  mask         0.000e+00
-  max |adapter - upstream|  size         0.000e+00
-  max |adapter - upstream|  adj          0.000e+00
-  max |adapter - upstream|  cell_coords  0.000e+00
-  max |adapter - upstream|  cell_types   0.000e+00
-
-OK: every tensor the model receives is bit-identical.
+compared 24 tiles
+  max |adapter - upstream|  tissue  image  mask  size  adj  cell_coords  cell_types
+                            0.0e+00 for all seven
 ```
+
+Bit-identical, so the model cannot tell which loader fed it. The throwaway script
+that produced this was removed once it had served its purpose.
 
 ## Tissue compartments
 
@@ -498,7 +493,7 @@ step can be added later if the matrix is ever published.
 
 | | |
 |---|---|
-| added | `bench.py`, `run_histocell.py`, `setup_env.sh`, `scripts/test_dataset_equivalence.py`, and `HEDeST/run_histocell.sh` |
+| added | `bench.py`, `run_histocell.py`, `setup_env.sh`, and `HEDeST/run_histocell.sh` |
 | modified | `data.py` (added `SlideTileDataset`), `configs.py` (added `_get_bench_config`), this `README.md` |
 | removed | `model/__pycache__/`, `utils/__pycache__/` (stale python-3.7 bytecode) |
 
