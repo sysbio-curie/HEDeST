@@ -2,10 +2,10 @@ cache
 __pycache*
 *.svg
 *.md
+!README.md
 
 benchmark/results
 benchmark/annotation_code
-benchmark/endecon_code/README.md
 benchmark/endecon_code/reproduce.sh
 case_study/figures
 external/CellViT/docs
@@ -20,12 +20,10 @@ review
 simulations/full_simulations/figures
 simulations/full_simulations_v2/figures
 simulations/full_simulations_v2/logs
-simulations/full_simulations_v2/README.md
 simulations/semi_simulations/figures
 
 debug.log
 run_*
-!README.md
 !run_infer.sh
 !run_train.sh
 !run_utils
