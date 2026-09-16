@@ -1,0 +1,447 @@
+{
+ "note": "Everything needed to rebuild benchmark/results/PanoSpace/deconv from scratch. `deconvolutions` are the EnDecon runs; `outputs` are the 27 (sample, level) result directories. A `fine` output is not its own run: it is the sample's single fine-grained deconvolution aggregated to that level, and the direct run of the same level is kept beside it as proportions_direct.csv. Round-1 runs (breast/skin/lung/prostate, levels 0-2) carry via_level2: they map to the level-2 vocabulary and roll up, so a type with no level-2 home is absent at every level. Round-2 runs map at their own level, which is the only option for levels 3-4.",
+ "deconvolutions": [
+  {
+   "id": "breast_s6_level0",
+   "sample": "breast_s6",
+   "level": 0,
+   "atlas": "breast",
+   "fine": false,
+   "via_level2": true
+  },
+  {
+   "id": "breast_s6_level1",
+   "sample": "breast_s6",
+   "level": 1,
+   "atlas": "breast",
+   "fine": false,
+   "via_level2": true
+  },
+  {
+   "id": "breast_s6_level2",
+   "sample": "breast_s6",
+   "level": 2,
+   "atlas": "breast",
+   "fine": false,
+   "via_level2": true
+  },
+  {
+   "id": "cervix_s0_0_level0",
+   "sample": "cervix_s0_0",
+   "level": 0,
+   "atlas": "ovary",
+   "fine": false,
+   "granulosa_as_epithelial": true
+  },
+  {
+   "id": "cervix_s0_0_level1",
+   "sample": "cervix_s0_0",
+   "level": 1,
+   "atlas": "ovary",
+   "fine": false,
+   "granulosa_as_epithelial": true
+  },
+  {
+   "id": "cervix_s0_0_level2",
+   "sample": "cervix_s0_0",
+   "level": 2,
+   "atlas": "ovary",
+   "fine": false,
+   "granulosa_as_epithelial": true
+  },
+  {
+   "id": "cervix_s0_0_level3",
+   "sample": "cervix_s0_0",
+   "level": 3,
+   "atlas": "ovary",
+   "fine": false,
+   "granulosa_as_epithelial": true
+  },
+  {
+   "id": "cervix_s0_1_level0",
+   "sample": "cervix_s0_1",
+   "level": 0,
+   "atlas": "ovary",
+   "fine": false,
+   "granulosa_as_epithelial": true
+  },
+  {
+   "id": "cervix_s0_1_level1",
+   "sample": "cervix_s0_1",
+   "level": 1,
+   "atlas": "ovary",
+   "fine": false,
+   "granulosa_as_epithelial": true
+  },
+  {
+   "id": "cervix_s0_1_level2",
+   "sample": "cervix_s0_1",
+   "level": 2,
+   "atlas": "ovary",
+   "fine": false,
+   "granulosa_as_epithelial": true
+  },
+  {
+   "id": "cervix_s0_1_level3",
+   "sample": "cervix_s0_1",
+   "level": 3,
+   "atlas": "ovary",
+   "fine": false,
+   "granulosa_as_epithelial": true
+  },
+  {
+   "id": "lung_s3_level0",
+   "sample": "lung_s3",
+   "level": 0,
+   "atlas": "lung",
+   "fine": false,
+   "via_level2": true
+  },
+  {
+   "id": "lung_s3_level1",
+   "sample": "lung_s3",
+   "level": 1,
+   "atlas": "lung",
+   "fine": false,
+   "via_level2": true
+  },
+  {
+   "id": "lung_s3_level2",
+   "sample": "lung_s3",
+   "level": 2,
+   "atlas": "lung",
+   "fine": false,
+   "via_level2": true
+  },
+  {
+   "id": "lung_s3_level3",
+   "sample": "lung_s3",
+   "level": 3,
+   "atlas": "lung",
+   "fine": false
+  },
+  {
+   "id": "lung_s3_level4",
+   "sample": "lung_s3",
+   "level": 4,
+   "atlas": "lung",
+   "fine": false
+  },
+  {
+   "id": "ovary_s1_level0",
+   "sample": "ovary_s1",
+   "level": 0,
+   "atlas": "ovary",
+   "fine": false,
+   "granulosa_as_epithelial": false
+  },
+  {
+   "id": "ovary_s1_level1",
+   "sample": "ovary_s1",
+   "level": 1,
+   "atlas": "ovary",
+   "fine": false,
+   "granulosa_as_epithelial": false
+  },
+  {
+   "id": "ovary_s1_level2",
+   "sample": "ovary_s1",
+   "level": 2,
+   "atlas": "ovary",
+   "fine": false,
+   "granulosa_as_epithelial": false
+  },
+  {
+   "id": "ovary_s1_level3",
+   "sample": "ovary_s1",
+   "level": 3,
+   "atlas": "ovary",
+   "fine": false,
+   "granulosa_as_epithelial": false
+  },
+  {
+   "id": "prostate_s0_level0",
+   "sample": "prostate_s0",
+   "level": 0,
+   "atlas": "prostate",
+   "fine": false,
+   "via_level2": true
+  },
+  {
+   "id": "prostate_s0_level1",
+   "sample": "prostate_s0",
+   "level": 1,
+   "atlas": "prostate",
+   "fine": false,
+   "via_level2": true
+  },
+  {
+   "id": "prostate_s0_level2",
+   "sample": "prostate_s0",
+   "level": 2,
+   "atlas": "prostate",
+   "fine": false,
+   "via_level2": true
+  },
+  {
+   "id": "prostate_s0_level3",
+   "sample": "prostate_s0",
+   "level": 3,
+   "atlas": "prostate",
+   "fine": false
+  },
+  {
+   "id": "skin_s4_level0",
+   "sample": "skin_s4",
+   "level": 0,
+   "atlas": "skin",
+   "fine": false,
+   "via_level2": true
+  },
+  {
+   "id": "skin_s4_level1",
+   "sample": "skin_s4",
+   "level": 1,
+   "atlas": "skin",
+   "fine": false,
+   "via_level2": true
+  },
+  {
+   "id": "skin_s4_level2",
+   "sample": "skin_s4",
+   "level": 2,
+   "atlas": "skin",
+   "fine": false,
+   "via_level2": true
+  },
+  {
+   "id": "lung_s3_fine",
+   "sample": "lung_s3",
+   "level": 2,
+   "atlas": "lung",
+   "fine": true
+  },
+  {
+   "id": "prostate_s0_fine",
+   "sample": "prostate_s0",
+   "level": 2,
+   "atlas": "prostate",
+   "fine": true
+  },
+  {
+   "id": "ovary_s1_level0_granulosa_in",
+   "sample": "ovary_s1",
+   "level": 0,
+   "atlas": "ovary",
+   "granulosa_as_epithelial": true,
+   "fine": false,
+   "note": "granulosa variant, scored then discarded; see granulosa_test.json"
+  },
+  {
+   "id": "cervix_s0_0_level0_granulosa_out",
+   "sample": "cervix_s0_0",
+   "level": 0,
+   "atlas": "ovary",
+   "granulosa_as_epithelial": false,
+   "fine": false,
+   "note": "granulosa variant, scored then discarded; see granulosa_test.json"
+  }
+ ],
+ "outputs": [
+  {
+   "sample": "breast_s6",
+   "level": 0,
+   "method": "direct",
+   "proportions_from": "breast_s6_level0",
+   "aggregate": false
+  },
+  {
+   "sample": "breast_s6",
+   "level": 1,
+   "method": "direct",
+   "proportions_from": "breast_s6_level1",
+   "aggregate": false
+  },
+  {
+   "sample": "breast_s6",
+   "level": 2,
+   "method": "direct",
+   "proportions_from": "breast_s6_level2",
+   "aggregate": false
+  },
+  {
+   "sample": "cervix_s0_0",
+   "level": 0,
+   "method": "direct",
+   "proportions_from": "cervix_s0_0_level0",
+   "aggregate": false
+  },
+  {
+   "sample": "cervix_s0_0",
+   "level": 1,
+   "method": "direct",
+   "proportions_from": "cervix_s0_0_level1",
+   "aggregate": false
+  },
+  {
+   "sample": "cervix_s0_0",
+   "level": 2,
+   "method": "direct",
+   "proportions_from": "cervix_s0_0_level2",
+   "aggregate": false
+  },
+  {
+   "sample": "cervix_s0_0",
+   "level": 3,
+   "method": "direct",
+   "proportions_from": "cervix_s0_0_level3",
+   "aggregate": false
+  },
+  {
+   "sample": "cervix_s0_1",
+   "level": 0,
+   "method": "direct",
+   "proportions_from": "cervix_s0_1_level0",
+   "aggregate": false
+  },
+  {
+   "sample": "cervix_s0_1",
+   "level": 1,
+   "method": "direct",
+   "proportions_from": "cervix_s0_1_level1",
+   "aggregate": false
+  },
+  {
+   "sample": "cervix_s0_1",
+   "level": 2,
+   "method": "direct",
+   "proportions_from": "cervix_s0_1_level2",
+   "aggregate": false
+  },
+  {
+   "sample": "cervix_s0_1",
+   "level": 3,
+   "method": "direct",
+   "proportions_from": "cervix_s0_1_level3",
+   "aggregate": false
+  },
+  {
+   "sample": "lung_s3",
+   "level": 0,
+   "method": "fine",
+   "proportions_from": "lung_s3_fine",
+   "aggregate": true,
+   "also_keep": "lung_s3_level0"
+  },
+  {
+   "sample": "lung_s3",
+   "level": 1,
+   "method": "fine",
+   "proportions_from": "lung_s3_fine",
+   "aggregate": true,
+   "also_keep": "lung_s3_level1"
+  },
+  {
+   "sample": "lung_s3",
+   "level": 2,
+   "method": "fine",
+   "proportions_from": "lung_s3_fine",
+   "aggregate": true,
+   "also_keep": "lung_s3_level2"
+  },
+  {
+   "sample": "lung_s3",
+   "level": 3,
+   "method": "direct",
+   "proportions_from": "lung_s3_level3",
+   "aggregate": false
+  },
+  {
+   "sample": "lung_s3",
+   "level": 4,
+   "method": "direct",
+   "proportions_from": "lung_s3_level4",
+   "aggregate": false
+  },
+  {
+   "sample": "ovary_s1",
+   "level": 0,
+   "method": "direct",
+   "proportions_from": "ovary_s1_level0",
+   "aggregate": false
+  },
+  {
+   "sample": "ovary_s1",
+   "level": 1,
+   "method": "direct",
+   "proportions_from": "ovary_s1_level1",
+   "aggregate": false
+  },
+  {
+   "sample": "ovary_s1",
+   "level": 2,
+   "method": "direct",
+   "proportions_from": "ovary_s1_level2",
+   "aggregate": false
+  },
+  {
+   "sample": "ovary_s1",
+   "level": 3,
+   "method": "direct",
+   "proportions_from": "ovary_s1_level3",
+   "aggregate": false
+  },
+  {
+   "sample": "prostate_s0",
+   "level": 0,
+   "method": "fine",
+   "proportions_from": "prostate_s0_fine",
+   "aggregate": true,
+   "also_keep": "prostate_s0_level0"
+  },
+  {
+   "sample": "prostate_s0",
+   "level": 1,
+   "method": "fine",
+   "proportions_from": "prostate_s0_fine",
+   "aggregate": true,
+   "also_keep": "prostate_s0_level1"
+  },
+  {
+   "sample": "prostate_s0",
+   "level": 2,
+   "method": "fine",
+   "proportions_from": "prostate_s0_fine",
+   "aggregate": true,
+   "also_keep": "prostate_s0_level2"
+  },
+  {
+   "sample": "prostate_s0",
+   "level": 3,
+   "method": "direct",
+   "proportions_from": "prostate_s0_level3",
+   "aggregate": false
+  },
+  {
+   "sample": "skin_s4",
+   "level": 0,
+   "method": "direct",
+   "proportions_from": "skin_s4_level0",
+   "aggregate": false
+  },
+  {
+   "sample": "skin_s4",
+   "level": 1,
+   "method": "direct",
+   "proportions_from": "skin_s4_level1",
+   "aggregate": false
+  },
+  {
+   "sample": "skin_s4",
+   "level": 2,
+   "method": "direct",
+   "proportions_from": "skin_s4_level2",
+   "aggregate": false
+  }
+ ]
+}
