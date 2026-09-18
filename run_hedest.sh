@@ -30,6 +30,8 @@ for seed in {0..9}; do
     --divergence l2 \
     --alpha 0 \
     --beta 0.0 \
+    --adjustment interpolated \
+    --no-gated \
     --epochs 100 \
     --train-size 0.8 \
     --val-size 0.1 \

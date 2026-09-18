@@ -64,10 +64,11 @@ Then follow these preprocessing steps:
 
 ### Training
 
-Once you have the embeddings and the proportions, you can run HEDeST using ``run_hedest.sh``. To apply Prior Probability Shift Adjustment (highly recommended), also provide:
-- the HoverNet segmentation .json file
-- the AnnData object for your slide
-- the slide name
+Once you have the embeddings and the proportions, you can run HEDeST using ``run_hedest.sh``. Prior Probability Shift Adjustment (highly recommended) is applied automatically, and two options control it:
+- ``--adjustment interpolated|nearest``: for the cells outside spots, ``interpolated`` (default) uses a distance-weighted mean of the ≤3 nearest spots, ``nearest`` uses the proportions of the closest spot.
+- ``--gated/--no-gated``: ``--no-gated`` (default) adjusts every cell, ``--gated`` adjusts only the cells inside spots.
+
+Adjusting the cells outside spots requires the HoverNet segmentation .json file, the AnnData object for your slide and the slide name. Without them only the cells inside spots are adjusted, and a warning tells you so. Gated runs and fully simulated datasets need none of the three.
 
 The spot diameter in AnnData objects is for visualization purposes only. If you want to get the real diameter (in pixels) of ST spots, we recommend you to change it with your image resolution (diameter = 55 / mpp). To know your mpp (microns per pixel), you can use ``external/hovernet/get_tiff_resolution.py`` or open the image in QuPath.
 

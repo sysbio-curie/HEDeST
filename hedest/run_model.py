@@ -21,8 +21,8 @@ from hedest.dataset_utils import custom_collate
 from hedest.dataset_utils import get_transform
 from hedest.dataset_utils import split_data
 from hedest.model.cell_classifier import CellClassifier
-from hedest.ppsa import PPSAdjustment
-from hedest.ppsa import PPSANaive
+from hedest.ppsa import ADJUSTMENT_CLASSES
+from hedest.ppsa import ADJUSTMENT_METHODS
 from hedest.predict import predict_slide
 from hedest.trainer import ModelTrainer
 from hedest.utils import format_time
@@ -45,6 +45,8 @@ def run_hedest(
     divergence: str = "l2",
     alpha: float = 0.0,
     beta: float = 0.0,
+    adjustment: str = "interpolated",
+    gated: bool = False,
     epochs: int = 60,
     train_size: float = 0.5,
     val_size: float = 0.25,
@@ -72,6 +74,10 @@ def run_hedest(
         divergence: Type of divergence loss to use ("l1", "l2", "kl", "rot").
         alpha: Weighting factor for the loss function.
         beta: Weighting factor for the Bayesian adjustment.
+        adjustment: PPSA method, "interpolated" (weighted mean of the <= 3 nearest spots for the
+                    cells outside spots) or "nearest" (proportions of the closest spot).
+        gated: If True, adjust only the cells inside spots. If False (default), adjust every cell,
+               which needs adata, adata_name and json_path to locate the cells outside spots.
         epochs: Number of training epochs.
         train_size: Proportion of data used for training.
         val_size: Proportion of data used for validation.
@@ -80,6 +86,9 @@ def run_hedest(
         color_dict_file: Path to a YAML color dict (special format).
         rs: Random seed for reproducibility.
     """
+
+    if adjustment not in ADJUSTMENT_METHODS:
+        raise ValueError(f"Invalid value for 'adjustment': {adjustment}. Must be one of {set(ADJUSTMENT_METHODS)}.")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Using device: {device}")
@@ -187,29 +196,24 @@ def run_hedest(
     # Prior Probability Shift adjustment
     p_c = spot_prop_df.loc[list(train_spot_dict.keys())].mean(axis=0)
 
-    if json_path is None or adata is None or adata_name is None:
-        logger.info("Starting naive PPSA...")
-        cell_prob_best_adjusted = PPSANaive(
-            cell_prob_best,
-            spot_dict,
-            spot_prop_df,
-            p_c,
-            beta=beta,
-        ).adjust()
-
-    else:
-        logger.info("Starting spatial PPSA...")
-        cell_prob_best_adjusted = PPSAdjustment(
-            cell_prob_best,
-            spot_dict,
-            spot_prop_df,
-            p_c,
-            adata=adata,
-            adata_name=adata_name,
-            json_path=json_path,
-            beta=beta,
-            device=device,
-        ).adjust()
+    logger.info(f"Starting {adjustment} PPSA (gated={gated})...")
+    ppsa = ADJUSTMENT_CLASSES[adjustment](
+        cell_prob_best,
+        spot_dict,
+        spot_prop_df,
+        p_c,
+        adata=adata,
+        adata_name=adata_name,
+        json_path=json_path,
+        gated=gated,
+        beta=beta,
+        device=device,
+    )
+    cell_prob_best_adjusted = ppsa.adjust()
+    logger.info(
+        f"-> {len(ppsa.adjustable_cells)}/{len(cell_prob_best)} cells adjusted "
+        f"(method={ppsa.method}, gated={ppsa.gated})."
+    )
 
     # Save model infos
     model_info = {
@@ -220,6 +224,8 @@ def run_hedest(
         "spot_dict": spot_dict,
         "train_spot_dict": train_spot_dict,
         "proportions": spot_prop_df,
+        "adjustment": ppsa.method,  # PPSA settings actually applied
+        "gated": ppsa.gated,
         "history": {"train": trainer.history_train, "val": trainer.history_val},
         "preds": {
             "pred_best": cell_prob_best,

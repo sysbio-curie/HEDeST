@@ -67,6 +67,8 @@ class PredAnalyzer:
         "adata_name",
         "seg_dict",
         "ground_truth",
+        "adjustment",
+        "gated",
     }
 
     def __init__(self, adjusted: bool = True, model_info: Optional[Union[dict, str]] = None, **kwargs):

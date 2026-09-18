@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-from typing import List
-from typing import Tuple
-
 import torch
 import torchvision.transforms as transforms
 from torch.utils.data import Dataset
@@ -116,17 +113,3 @@ class CellProbDataset(Dataset):
 
     def __getitem__(self, idx):
         return self.p_cell[idx], self.p_local[idx], self.beta[idx], idx
-
-
-class CellProbDatasetNaive(Dataset):
-    """Dataset for cell probabilities used during naive PPSA."""
-
-    def __init__(self, cell_prob_tensor: torch.Tensor, spot_ids: List[int]):
-        self.cell_prob_tensor = cell_prob_tensor
-        self.spot_ids = spot_ids
-
-    def __len__(self) -> int:
-        return len(self.cell_prob_tensor)
-
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, int, int]:
-        return self.cell_prob_tensor[idx], self.spot_ids[idx], idx

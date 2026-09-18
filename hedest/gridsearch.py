@@ -27,6 +27,8 @@ def run_experiment(
     divergence: str,
     out_dir: str,
     seed: int,
+    adjustment: str = "interpolated",
+    gated: bool = False,
 ) -> None:
     """
     Runs one experiment (model) with the specified parameters.
@@ -49,6 +51,8 @@ def run_experiment(
         divergence: Divergence metric to use.
         out_dir: Output directory path.
         seed: Random seed for reproducibility.
+        adjustment: PPSA method, "interpolated" or "nearest".
+        gated: Whether PPSA adjusts only the cells inside spots.
     """
 
     config_out_dir = os.path.join(
@@ -97,6 +101,8 @@ def run_experiment(
         str(alpha),
         "--beta",
         str(beta),
+        "--adjustment",
+        adjustment,
         "--epochs",
         "80",
         "--out-dir",
@@ -107,6 +113,8 @@ def run_experiment(
 
     if norm:
         args.append("--norm")
+    if gated:
+        args.append("--gated")
 
     subprocess.run(args, check=True)
 
@@ -129,6 +137,8 @@ def main_simulation(
     seeds: List[int],
     batch_size: int,
     out_dir: str,
+    adjustment: str = "interpolated",
+    gated: bool = False,
 ) -> None:
     """
     Performs the main simulation pipeline for a given divergence metric.
@@ -151,6 +161,8 @@ def main_simulation(
         seeds: List of random seed values.
         batch_size: Batch size for training.
         out_dir: Output directory path.
+        adjustment: PPSA method, "interpolated" or "nearest".
+        gated: Whether PPSA adjusts only the cells inside spots.
     """
 
     logger.info(f"Image dictionary path: {image_dict_path}")
@@ -168,6 +180,7 @@ def main_simulation(
     logger.info(f"Learning rates: {learning_rates}")
     logger.info(f"Divergence metrics: {divergences}")
     logger.info(f"Random seeds: {seeds}")
+    logger.info(f"Adjustment: {adjustment} (gated: {gated})")
     logger.info(f"Output directory: {out_dir}\n")
 
     combinations = list(
@@ -194,6 +207,8 @@ def main_simulation(
                 divergence,
                 out_dir,
                 seed,
+                adjustment=adjustment,
+                gated=gated,
             )
 
 
@@ -226,6 +241,14 @@ if __name__ == "__main__":
     parser.add_argument("--divergences", nargs="+", type=str, required=True, help="List of divergence metrics")
     parser.add_argument("--seeds", nargs="+", type=int, required=True, help="List of random seed values")
     parser.add_argument("--batch_size", type=int, default=64, help="Batch size for training")
+    parser.add_argument(
+        "--adjustment",
+        type=str,
+        default="interpolated",
+        choices=["interpolated", "nearest"],
+        help="PPSA method used for the cells outside spots",
+    )
+    parser.add_argument("--gated", action="store_true", help="Adjust only the cells inside spots")
 
     # Output directory
     parser.add_argument("--out_dir", type=str, required=True, help="Output directory path")
@@ -251,4 +274,6 @@ if __name__ == "__main__":
         args.seeds,
         args.batch_size,
         args.out_dir,
+        args.adjustment,
+        args.gated,
     )

@@ -12,6 +12,7 @@ from loguru import logger
 
 from hedest.analysis.postseg import map_cells_to_spots
 from hedest.dataset_utils import pp_prop
+from hedest.ppsa import ADJUSTMENT_METHODS
 from hedest.run_model import run_hedest
 from hedest.utils import format_time
 from hedest.utils import load_spatial_adata
@@ -64,6 +65,14 @@ def main(
     divergence: str = typer.Option("l2", help="Metric to use for divergence computation. Can be 'l1', 'l2' or 'kl'."),
     alpha: float = typer.Option(0.0, help="Alpha parameter for loss function."),
     beta: float = typer.Option(0.0, help="Beta parameter for bayesian adjustment."),
+    adjustment: str = typer.Option(
+        "interpolated",
+        help=(
+            "PPSA method for the cells outside spots: 'interpolated' (weighted mean of the <=3 "
+            "nearest spots) or 'nearest' (proportions of the closest spot)."
+        ),
+    ),
+    gated: bool = typer.Option(False, help="Adjust only the cells inside spots (needs no cell coordinates)."),
     epochs: int = typer.Option(60, help="Number of training epochs."),
     train_size: float = typer.Option(0.7, help="Training set size as a fraction."),
     val_size: float = typer.Option(0.15, help="Validation set size as a fraction."),
@@ -84,11 +93,14 @@ def main(
     # Validate inputs
     valid_divergence = {"l1", "l2", "kl"}
     valid_model_name = {"default", "convnet", "resnet18"}
+    valid_adjustment = set(ADJUSTMENT_METHODS)
 
     if divergence not in valid_divergence:
         raise ValueError(f"Invalid value for 'divergence': {divergence}. Must be one of {valid_divergence}.")
     if model_name not in valid_model_name:
         raise ValueError(f"Invalid value for 'model_name': {model_name}. Must be one of {valid_model_name}.")
+    if adjustment not in valid_adjustment:
+        raise ValueError(f"Invalid value for 'adjustment': {adjustment}. Must be one of {valid_adjustment}.")
 
     MAIN_START = time.time()
 
@@ -164,6 +176,7 @@ def main(
     logger.info(f"Divergence: {divergence}")
     logger.info(f"Alpha: {alpha}")
     logger.info(f"Beta: {beta}")
+    logger.info(f"Adjustment: {adjustment} (gated: {gated})")
     logger.info(f"Number of epochs: {epochs}")
     logger.info(f"Train size: {train_size}")
     logger.info(f"Validation size: {val_size}")
@@ -188,6 +201,8 @@ def main(
         divergence=divergence,
         alpha=alpha,
         beta=beta,
+        adjustment=adjustment,
+        gated=gated,
         epochs=epochs,
         train_size=train_size,
         val_size=val_size,
