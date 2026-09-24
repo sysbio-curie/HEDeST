@@ -9,68 +9,113 @@
 ![figure](references/method.png)
 
 ## Installation
-To create your conda environment and install the requirements using ``pip``
+
+HEDeST uses two conda environments: **hedest-env** for the pipeline, the feature extraction, the model and the analysis, and **hovernet-env** for the tissue mask and the nuclei segmentation. HoVer-Net is kept apart because it needs Python 3.8 and its own torch build; the pipeline simply calls it as a subprocess.
+
 ```
 git clone git@github.com:lucagortana/HEDeST.git
 cd HEDeST
-conda create -y -n hedest-env python=3.9
+./setup_env.sh
+```
+
+The script creates both environments, installs openslide with conda and the rest with pip, records ``PYTHONPATH`` and ``LD_LIBRARY_PATH`` in them so the repository works as a source tree, and checks that the imports work. Useful options: ``--hedest-only``, ``--hovernet-only``, ``--force`` to rebuild an existing environment, and ``HEDEST_ENV=my-env ./setup_env.sh`` to change the names.
+
+To install by hand instead, follow the header of ``requirements.txt`` and ``requirements-hovernet.txt``.
+
+Then point the HoVer-Net stages at the second environment, in your pipeline configuration:
+```yaml
+mask:
+  python: /path/to/envs/hovernet-env/bin/python
+segmentation:
+  python: /path/to/envs/hovernet-env/bin/python
+```
+
+The pinned builds target linux-x86_64 with a CUDA GPU (cu116 for hedest-env, cu118 for hovernet-env). Everything except the mask and the segmentation runs in ``hedest-env``:
+```
 conda activate hedest-env
-pip install -r requirements.txt
-CODEPATH=$(realpath .)
-conda env config vars set PYTHONPATH=$PYTHONPATH:$CODEPATH:$CODEPATH/external:$CODEPATH/external/hovernet:$CODEPATH/external/mocov3
-conda deactivate
-conda activate hedest-env
-```
-To install pytorch and torch-scatter
-```
-pip install torch==1.13.1+cu116 torchvision==0.14.1+cu116 --extra-index-url https://download.pytorch.org/whl/cu116
-wget https://data.pyg.org/whl/torch-1.13.0%2Bcu116/torch_scatter-2.1.1%2Bpt113cu116-cp39-cp39-linux_x86_64.whl
-pip install torch_scatter-2.1.1+pt113cu116-cp39-cp39-linux_x86_64.whl
-```
-To install openslide
-```
-conda install -c conda-forge openslide=3.4.1
 ```
 
 ## Code structure
 The code is structured as follows :
 ```
-hedest/        → Source code for HEDeST and analysis tools
-benchmark/     → Benchmarking notebooks
-case_study/    → Notebook for the case study (tutorial)
-external/      → External tools (some modified for HEDeST)
-simulations/   → Code for generating and analyzing simulated data
+hedest/              → Source code for HEDeST and analysis tools
+  pipeline.py        → End-to-end pipeline (slide → predictions)
+  main.py            → HEDeST training alone
+  features/          → Cell feature extraction (H-Optimus-0)
+  slide.py           → Slide checking and conversion to pyramidal TIFF
+benchmark/           → Benchmarking notebooks
+case_study/          → Notebook for the case study (tutorial)
+external/            → External tools (some modified for HEDeST)
+simulations/         → Code for generating and analyzing simulated data
 
-run_mask.sh
-run_hovernet.sh
-run_moco_ssl.sh
-run_hedest.sh   → Shell scripts to run the full HEDeST workflow (in this order)
+setup_env.sh              → Creates the two conda environments
+requirements.txt          → hedest-env (pipeline, features, model, analysis)
+requirements-hovernet.txt → hovernet-env (mask, segmentation)
 ```
 
 ## Usage
 
 ![figure](references/pp_train.png)
 
-### Pre-processing
+To use HEDeST, you need an H&E slide (pyramidal .tif) and a CSV file with the cell-type proportions per spatial transcriptomics spot. Everything else is produced by the pipeline: tissue mask → nuclei segmentation → cell embeddings → cell types.
 
-To use HEDeST, you need:
-- An H&E slide in .tif format
-- A CSV file containing cell-type proportions per spatial transcriptomics spot
+### Full pipeline
 
-Then follow these preprocessing steps:
-- use ``run_mask.sh`` to get a binary mask of your H&E slide
-- use ``run_hovernet.sh`` to segment the slide and extract single-cell images in a dictionnary
-- use ``run_moco_ssl.sh`` to train moco-v3 and infer the embeddings
+```
+python hedest/pipeline.py init-config my_run.yaml   # writes a documented template
+# fill in the slide, the output directory, the proportions and the HoVer-Net checkpoint
+python hedest/pipeline.py run my_run.yaml
+```
 
-### Training
+This runs the five stages in order and writes everything under ``out_dir`` (``slide/``, ``mask/``, ``segmentation/``, ``features/``, ``model/``), plus a ``pipeline.json`` recording what was produced.
 
-Once you have the embeddings and the proportions, you can run HEDeST using ``run_hedest.sh``. Prior Probability Shift Adjustment (highly recommended) is applied automatically, and two options control it:
+- **check** — verifies the slide opens, is pyramidal and has a known resolution, and converts it to a pyramidal TIFF otherwise. If it cannot, it stops and says why.
+- **mask** — computes the tissue mask. HoVer-Net's automatic mask is never used: the segmentation stage refuses to run without a mask of ours.
+- **segment** — HoVer-Net nuclei segmentation. Cells are numbered by their position in the JSON, and that numbering ties the crops, the embeddings and the spot dictionary together.
+- **features** — H-Optimus-0 tile embeddings pooled per nucleus.
+- **train** — HEDeST itself.
+
+HoVer-Net usually needs its own environment: set ``segmentation.python`` to that interpreter in the config. Set ``segmentation.image_dict_path`` to a ``.pt`` path if you also want the cell crops for later plotting (they are large, so the default is to skip them).
+
+Run only part of it with ``--stages``, for instance ``--stages mask,segment``. Each stage checks the outputs of the previous one and reuses what is already there.
+
+### Running a step on its own
+
+```
+# --- in hovernet-env ---
+
+# tissue mask
+python external/hovernet/run_mask.py slide.tif mask/slide.png --mask-level 3
+
+# nuclei segmentation (add --image_dict_path cells.pt instead of --skip_image_dict to also save the crops)
+python external/hovernet/run_infer.py --gpu=0 --nr_types=6 --model_mode=fast \
+    --model_path=hovernet_fast_pannuke_type_tf2pytorch.tar --mpp=0.2754 \
+    wsi --input_dir=slide_dir/ --output_dir=seg/ --input_mask_dir=mask/ --skip_image_dict
+
+# --- in hedest-env ---
+
+# check the slide, and convert it if OpenSlide cannot read it
+python hedest/pipeline.py check slide.tif --convert
+
+# cell embeddings
+python hedest/features/hoptimus.py slide.tif seg/slide.json features/slide_hoptimus.pt --mpp 0.2754
+
+# HEDeST
+python hedest/main.py features/slide_hoptimus.pt proportions.csv \
+    --json-path seg/slide.json --path-st-adata adata.h5ad --mpp 0.2754 --out-dir results/
+```
+
+``hedest/main.py`` takes any ``{cell_id: embedding}`` dictionary, so MoCo-v3 embeddings (``run_moco_ssl.sh``) work as well as H-Optimus-0.
+
+### Adjustment and spot geometry
+
+Prior Probability Shift Adjustment (highly recommended) is applied automatically, and two options control it:
 - ``--adjustment interpolated|nearest``: for the cells outside spots, ``interpolated`` (default) uses a distance-weighted mean of the ≤3 nearest spots, ``nearest`` uses the proportions of the closest spot.
 - ``--gated/--no-gated``: ``--no-gated`` (default) adjusts every cell, ``--gated`` adjusts only the cells inside spots.
 
 Adjusting the cells outside spots requires the HoverNet segmentation .json file, the AnnData object for your slide and the slide name. Without them only the cells inside spots are adjusted, and a warning tells you so. Gated runs and fully simulated datasets need none of the three.
 
-The spot diameter in AnnData objects is for visualization purposes only. If you want to get the real diameter (in pixels) of ST spots, we recommend you to change it with your image resolution (diameter = 55 / mpp). To know your mpp (microns per pixel), you can use ``external/hovernet/get_tiff_resolution.py`` or open the image in QuPath.
+The spot diameter in AnnData objects is for visualization purposes only. Pass ``--mpp`` (microns per pixel) so the real diameter is used instead (diameter = 55 / mpp); the pipeline does it for you. To find your mpp, use ``external/hovernet/get_tiff_resolution.py``, ``python hedest/pipeline.py check slide.tif``, or open the image in QuPath.
 
 ## Tutorial
 
@@ -92,7 +137,7 @@ After running preprocessing and training, open the notebook ``case_study/DCIS_st
 
 ## Some classic errors
 During segmentation, you can get the ``OSError: [Errno 39] Directory not empty: 'cache'`` error. Make sure to delete everything you have in this repository and apply chmod 777. \
-Also, you can get the Openslide's error ``openslide.lowlevel.OpenSlideUnsupportedFormatError: Unsupported or missing image file``. In that case, we recommend to check the properties of your file with the command ``openslide-show-properties your_file.tif``. If your file is indeed incompatible with Openslide, then you can try :
+Also, you can get the Openslide's error ``openslide.lowlevel.OpenSlideUnsupportedFormatError: Unsupported or missing image file``. The pipeline detects this and converts the slide for you; ``python hedest/pipeline.py check your_file.tif --convert`` does it on its own. To convert it yourself instead:
 ```
 vips tiffsave your_file.tif output-pyramidal.tif --tile --pyramid --bigtiff --compression jpeg --Q 90
 ```
