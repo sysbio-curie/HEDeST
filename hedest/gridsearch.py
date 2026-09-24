@@ -10,13 +10,12 @@ from loguru import logger
 
 
 def run_experiment(
-    image_dict_path: str,
+    features_path: str,
     spot_prop_df: str,
     json_path: str,
     path_st_adata: str,
     adata_name: str,
     spot_dict_file: str,
-    model_name: str,
     hidden_dim: str,
     norm: bool,
     dropout: float,
@@ -34,13 +33,12 @@ def run_experiment(
     Runs one experiment (model) with the specified parameters.
 
     Args:
-        image_dict_path: Path to the image dictionary file.
+        features_path: Path to the cell feature dictionary (.pt).
         spot_prop_df: Path to the spot proportions DataFrame.
         json_path: Path to the JSON file containing segmentation.
         path_st_adata: Path to the spatial transcriptomics AnnData file.
         adata_name: Name of the AnnData object.
         spot_dict_file: Path to the spot dictionary file.
-        model_name: Name of the model to use.
         hidden_dim: Hidden dimensions for the model.
         norm: Whether to add a LayerNorm layer.
         dropout: Dropout rate.
@@ -58,7 +56,7 @@ def run_experiment(
     config_out_dir = os.path.join(
         out_dir,
         (
-            f"model_{model_name}_"
+            "model_default_"
             f"hidden_dim_{hidden_dim.replace(',', '-')}_"
             f"norm_{norm}_"
             f"dropout_{dropout}_"
@@ -75,7 +73,7 @@ def run_experiment(
         "python3",
         "-u",
         "hedest/main.py",
-        image_dict_path,
+        features_path,
         spot_prop_df,
         "--json-path",
         json_path,
@@ -85,8 +83,6 @@ def run_experiment(
         adata_name,
         "--spot-dict-file",
         spot_dict_file,
-        "--model-name",
-        model_name,
         "--hidden-dims",
         hidden_dim,
         "--dropout",
@@ -120,13 +116,12 @@ def run_experiment(
 
 
 def main_simulation(
-    image_dict_path: str,
+    features_path: str,
     spot_prop_df: str,
     json_path: str,
     path_st_adata: str,
     adata_name: str,
     spot_dict_file: str,
-    models: List[str],
     hidden_dims: List[str],
     norms: List[bool],
     dropouts: List[float],
@@ -144,13 +139,12 @@ def main_simulation(
     Performs the main simulation pipeline for a given divergence metric.
 
     Args:
-        image_dict_path: Path to the image dictionary file.
+        features_path: Path to the cell feature dictionary (.pt).
         spot_prop_df: Path to the spot proportions DataFrame.
         json_path: Path to the JSON file containing segmentation.
         path_st_adata: Path to the spatial transcriptomics AnnData file.
         adata_name: Name of the AnnData object.
         spot_dict_file: Path to the spot dictionary file.
-        models: List of model names.
         hidden_dims: List of hidden dimensions.
         norms: List of normalization options.
         dropouts: List of dropout rates.
@@ -165,13 +159,12 @@ def main_simulation(
         gated: Whether PPSA adjusts only the cells inside spots.
     """
 
-    logger.info(f"Image dictionary path: {image_dict_path}")
+    logger.info(f"Cell features path: {features_path}")
     logger.info(f"Spot proportions DataFrame path: {spot_prop_df}")
     logger.info(f"JSON path: {json_path}")
     logger.info(f"Path to spatial transcriptomics AnnData: {path_st_adata}")
     logger.info(f"AnnData name: {adata_name}")
     logger.info(f"Spot dictionary file path: {spot_dict_file}")
-    logger.info(f"Models: {models}")
     logger.info(f"Hidden dimensions: {hidden_dims}")
     logger.info(f"Normalization options: {norms}")
     logger.info(f"Dropout rates: {dropouts}")
@@ -183,20 +176,17 @@ def main_simulation(
     logger.info(f"Adjustment: {adjustment} (gated: {gated})")
     logger.info(f"Output directory: {out_dir}\n")
 
-    combinations = list(
-        itertools.product(models, hidden_dims, norms, dropouts, alphas, learning_rates, divergences, betas)
-    )
+    combinations = list(itertools.product(hidden_dims, norms, dropouts, alphas, learning_rates, divergences, betas))
 
-    for model_name, hidden_dim, norm, dropout, alpha, lr, divergence, beta in combinations:
+    for hidden_dim, norm, dropout, alpha, lr, divergence, beta in combinations:
         for seed in seeds:
             run_experiment(
-                image_dict_path,
+                features_path,
                 spot_prop_df,
                 json_path,
                 path_st_adata,
                 adata_name,
                 spot_dict_file,
-                model_name,
                 hidden_dim,
                 norm,
                 dropout,
@@ -216,7 +206,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run experiments with specified parameters")
 
     # String arguments
-    parser.add_argument("image_dict_path", type=str, help="Path to the image dictionary file")
+    parser.add_argument("features_path", type=str, help="Path to the cell feature dictionary (.pt)")
     parser.add_argument("spot_prop_df", type=str, help="Path to the spot proportions DataFrame")
     parser.add_argument("json_path", type=str, help="Path to the JSON file containing segmentation")
     parser.add_argument("path_st_adata", type=str, help="Path to the spatial transcriptomics AnnData file")
@@ -224,7 +214,6 @@ if __name__ == "__main__":
     parser.add_argument("spot_dict_file", type=str, help="Path to the spot dictionary file")
 
     # List arguments
-    parser.add_argument("--models", nargs="+", type=str, required=True, help="List of model names")
     parser.add_argument("--hidden_dims", nargs="+", type=str, required=True, help="List of hidden dimensions")
     parser.add_argument(
         "--norm_options",
@@ -257,13 +246,12 @@ if __name__ == "__main__":
     norms = [bool(n) for n in args.norm_options]
 
     main_simulation(
-        args.image_dict_path,
+        args.features_path,
         args.spot_prop_df,
         args.json_path,
         args.path_st_adata,
         args.adata_name,
         args.spot_dict_file,
-        args.models,
         args.hidden_dims,
         norms,
         args.dropouts,

@@ -4,7 +4,6 @@ from typing import Union
 
 import pandas as pd
 import torch
-import torchvision.transforms as transforms
 from sklearn.model_selection import train_test_split
 
 
@@ -73,37 +72,24 @@ def pp_prop(spot_prop: Union[pd.DataFrame, str]) -> pd.DataFrame:
     return spot_prop
 
 
-def get_transform(model_name: str) -> transforms.Compose:
-    """
-    Returns the appropriate image transformation for a given model.
-
-    Args:
-        model_name: The name of the model.
-
-    Returns:
-        A composition of image transformations.
-    """
-
-    if "resnet" in model_name:
-        transform = transforms.Compose([transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
-
-    elif model_name == "convnet":
-        transform = None
-    else:
-        raise ValueError(f"Model {model_name} not recognized or not supported.")
-    return transform
-
-
 def custom_collate(batch: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
     """
-    Custom collate function to combine a list of data samples into a batch.
+    Custom collate function to combine a list of spots into a batch.
+
+    The cells of a spot are concatenated as one contiguous block, in the order the spots
+    appear in the batch, so spot number ``b`` of the batch owns block number ``b``. The
+    bag indices are therefore built here, positionally: ``bag_indices[i] == b`` means that
+    cell ``i`` belongs to the spot whose proportions are ``proportions[b]``. This is what
+    makes ``scatter_mean(outputs, bag_indices)`` line up row by row with ``proportions``.
 
     Args:
-        batch: A list of dictionaries, each containing 'images', 'proportions', and 'bag_indices'.
+        batch: A list of dictionaries, each containing 'embeddings' and 'proportions'.
     """
 
-    images = torch.cat([b["images"] for b in batch])
-    proportions = torch.stack([b["proportions"] for b in batch])
-    bag_indices = torch.cat([b["bag_indices"] for b in batch])
+    counts = torch.tensor([b["embeddings"].shape[0] for b in batch], dtype=torch.long)
 
-    return {"images": images, "proportions": proportions, "bag_indices": bag_indices}
+    embeddings = torch.cat([b["embeddings"] for b in batch])
+    proportions = torch.stack([b["proportions"] for b in batch])
+    bag_indices = torch.repeat_interleave(torch.arange(len(batch), dtype=torch.long), counts)
+
+    return {"embeddings": embeddings, "proportions": proportions, "bag_indices": bag_indices}

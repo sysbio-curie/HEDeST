@@ -49,14 +49,13 @@ def parse_hidden_dims(hidden_dims: str) -> List[int]:
 
 @app.command()
 def main(
-    image_path: str = typer.Argument(..., help="Path to the high-quality WSI directory or image dict."),
+    features_path: str = typer.Argument(..., help="Path to the cell feature dictionary (.pt)."),
     spot_prop_file: str = typer.Argument(..., help="Path to the proportions file."),
     json_path: Optional[str] = typer.Option(None, help="Path to the post-segmentation file."),
     path_st_adata: Optional[str] = typer.Option(None, help="Path to the ST anndata object."),
     adata_name: Optional[str] = typer.Option(None, help="Name of the sample."),
     spot_dict_file: Optional[str] = typer.Option(None, help="Path to the spot-to-cell json file."),
     mpp: Optional[float] = typer.Option(None, help="Microns per pixel of the WSI."),
-    model_name: str = typer.Option("default", help="Type of model. Can be 'default', 'convnet', or 'resnet18'."),
     hidden_dims: str = typer.Option("512,256", help="Hidden dimensions for the model (comma-separated)."),
     norm: bool = typer.Option(False, help="Whether to add a LayerNorm layer."),
     dropout: float = typer.Option(0.0, help="Dropout rate."),
@@ -92,13 +91,10 @@ def main(
 
     # Validate inputs
     valid_divergence = {"l1", "l2", "kl"}
-    valid_model_name = {"default", "convnet", "resnet18"}
     valid_adjustment = set(ADJUSTMENT_METHODS)
 
     if divergence not in valid_divergence:
         raise ValueError(f"Invalid value for 'divergence': {divergence}. Must be one of {valid_divergence}.")
-    if model_name not in valid_model_name:
-        raise ValueError(f"Invalid value for 'model_name': {model_name}. Must be one of {valid_model_name}.")
     if adjustment not in valid_adjustment:
         raise ValueError(f"Invalid value for 'adjustment': {adjustment}. Must be one of {valid_adjustment}.")
 
@@ -108,24 +104,18 @@ def main(
         os.makedirs(out_dir)
         logger.info(f"-> Created output directory: {out_dir}")
 
-    # Image data loading
-    if image_path.endswith(".pt"):
-        logger.info(f"-> Loading image dictionary from {image_path}")
-        image_dict = torch.load(image_path)
-
-    else:
+    # Cell features loading
+    if not features_path.endswith(".pt"):
         raise ValueError(
-            f"Invalid image_path: {image_path}. "
-            "Expected a .pt file containing an image dictionary. "
-            "If you tried to pass a WSI directly, please segment it first "
-            "with run_hovernet.sh."
+            f"Invalid features_path: {features_path}. "
+            "Expected a .pt file holding a {cell_id: embedding} dictionary. "
+            "To compute one from a slide, run hedest/features/hoptimus.py, "
+            "or the whole pipeline with hedest/pipeline.py."
         )
 
-    example_img = image_dict[list(image_dict.keys())[0]]
-    try:
-        size = (example_img.shape[1], example_img.shape[1])
-    except Exception:
-        size = example_img.shape[0]
+    logger.info(f"-> Loading cell features from {features_path}")
+    embed_dict = torch.load(features_path)
+    embed_size = next(iter(embed_dict.values())).numel()
 
     # Load spot information
     logger.info(f"Loading proportions from {spot_prop_file}...")
@@ -166,8 +156,7 @@ def main(
     logger.info("=" * 50)
     logger.info("RUNNING SECONDARY DECONVOLUTION")
     logger.info("Parameters:")
-    logger.info(f"Image size: {size}")
-    logger.info(f"Model name: {model_name}")
+    logger.info(f"Cells: {len(embed_dict)} | embedding size: {embed_size}")
     logger.info(f"Hidden dims: {hidden_dims}")
     logger.info(f"Normalization: {norm}")
     logger.info(f"Dropout: {dropout}")
@@ -186,13 +175,12 @@ def main(
 
     # Run HEDeST
     run_hedest(
-        image_dict=image_dict,
+        embed_dict=embed_dict,
         spot_prop_df=spot_prop_df,
         spot_dict=spot_dict,
         json_path=json_path,
         adata=adata,
         adata_name=adata_name,
-        model_name=model_name,
         hidden_dims=hidden_dims,
         norm=norm,
         dropout=dropout,

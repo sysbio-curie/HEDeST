@@ -15,7 +15,7 @@ conda activate plugin-env
 
 export LD_LIBRARY_PATH=/cluster/CBIO/home/lgortana/anaconda3/envs/plugin-env/lib:$LD_LIBRARY_PATH
 
-IMAGE_DICT=$1
+FEATURES=$1
 SIM_CSV=$2
 JSON_PATH=$3
 ADATA_PATH=$4
@@ -30,7 +30,7 @@ while [[ "$#" -gt 0 ]]; do
 done
 
 python3 -u hedest/gridsearch.py \
-    "$IMAGE_DICT" \
+    "$FEATURES" \
     "$SIM_CSV" \
     "$JSON_PATH" \
     "$ADATA_PATH" \

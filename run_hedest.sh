@@ -22,7 +22,6 @@ for seed in {0..9}; do
     --path-st-adata /cluster/CBIO/data1/lgortana/Visium_FFPE_Human_Breast_Cancer/adata.h5ad \
     --adata-name Visium_FFPE_Human_Breast_Cancer \
     --spot-dict-file /cluster/CBIO/data1/lgortana/Visium_FFPE_Human_Breast_Cancer/spot_dict.json \
-    --model-name default \
     --norm \
     --dropout 0.0 \
     --batch-size 64 \

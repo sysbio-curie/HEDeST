@@ -50,7 +50,11 @@ class BaseCellClassifier(nn.Module, ABC):
         Args:
             outputs: The output probabilities from the model (num_cells x num_classes).
             bag_indices: Indices indicating which bag each cell belongs to (num_cells).
-            true_proportions: The ground-truth class proportions (num_classes).
+                         They must be row indices into `true_proportions`, i.e. values in
+                         [0, num_bags), so that averaging the cells of bag b yields the
+                         prediction compared against `true_proportions[b]`. They are built
+                         by `hedest.dataset_utils.custom_collate`.
+            true_proportions: The ground-truth class proportions (num_bags x num_classes).
             divergence: Type of divergence loss to use. Options are "l1", "l2", or "kl".
             alpha: Weight for the max probability loss. Should be in the range [0, 1].
 

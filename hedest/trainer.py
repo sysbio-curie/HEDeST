@@ -105,17 +105,14 @@ class ModelTrainer:
             # Training loop
             for batch in self.train_loader:
                 self.optimizer.zero_grad()
-                images = batch["images"].to(self.device)
+                embeddings = batch["embeddings"].to(self.device)
                 proportions = batch["proportions"].to(self.device)
-                bag_indices = batch["bag_indices"]
-                unique_indices = torch.unique(bag_indices, sorted=False).flip(0)
-                mapping = {val.item(): idx for idx, val in enumerate(unique_indices)}
-                new_bag_indices = torch.tensor([mapping[val.item()] for val in bag_indices]).to(self.device)
+                bag_indices = batch["bag_indices"].to(self.device)
 
-                cell_probs = self.model(images)
+                cell_probs = self.model(embeddings)
                 loss, loss_half1, loss_half2 = self.model.compute_loss(
                     cell_probs,
-                    new_bag_indices,
+                    bag_indices,
                     proportions,
                     divergence=self.divergence,
                     alpha=self.alpha,
@@ -172,17 +169,14 @@ class ModelTrainer:
 
         with torch.no_grad():
             for batch in dataloader:
-                images = batch["images"].to(self.device)
+                embeddings = batch["embeddings"].to(self.device)
                 proportions = batch["proportions"].to(self.device)
-                bag_indices = batch["bag_indices"]
-                unique_indices = torch.unique(bag_indices, sorted=False).flip(0)
-                mapping = {val.item(): idx for idx, val in enumerate(unique_indices)}
-                new_bag_indices = torch.tensor([mapping[val.item()] for val in bag_indices]).to(self.device)
+                bag_indices = batch["bag_indices"].to(self.device)
 
-                cell_probs = self.model(images)
+                cell_probs = self.model(embeddings)
                 loss, loss_half1, loss_half2 = self.model.compute_loss(
                     cell_probs,
-                    new_bag_indices,
+                    bag_indices,
                     proportions,
                     divergence=self.divergence,
                     alpha=self.alpha,
@@ -205,10 +199,8 @@ class ModelTrainer:
         # Load and evaluate the best model
         logger.info("Loading best model for final test evaluation...")
         best_model = type(self.model)(
-            model_name=self.model.model_name,
             num_classes=self.model.num_classes,
             embed_size=self.model.embed_size,
-            image_size=self.model.image_size,
             hidden_dims=self.model.hidden_dims,
             norm=self.model.norm,
             dropout=self.model.dropout,
