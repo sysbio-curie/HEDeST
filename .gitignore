@@ -13,7 +13,11 @@ external/CellViT/examples
 external/HistoCell-v0
 external/LEMON
 external/PanoSpace/panospace/_core/annotation/_RCTD_backend/extdata/
+gridsearch/plots
+gridsearch/results
+gridsearch/semi_sim*
 log
+logs
 models
 *.pdf
 review
@@ -38,8 +42,6 @@ run_*
 !run_moco.py
 !run_model.py
 !run_annotation.sh
-!run_extract_stats.sh
-!run_gridsearch.sh
 !run_hedest.sh
 !run_cellvit.sh
 !run_hovernet.sh
