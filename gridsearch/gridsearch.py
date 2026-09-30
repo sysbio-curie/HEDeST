@@ -74,19 +74,19 @@ app = typer.Typer(add_completion=False, pretty_exceptions_enable=False, help=__d
 
 # Defaults of hedest/main.py; `fixed` and `grid` override them.
 DEFAULTS: Dict[str, Any] = {
-    "hidden_dims": [512, 256],
-    "norm": False,
+    "hidden_dims": [1024, 512],
+    "norm": True,
     "dropout": 0.0,
     "batch_size": 64,
     "lr": 1e-4,
     "divergence": "l2",
-    "alpha": 0.0,
+    "alpha": 0.01,
     "beta": 0.0,
     "adjustment": "interpolated",
     "gated": False,
-    "epochs": 60,
-    "train_size": 0.7,
-    "val_size": 0.15,
+    "epochs": 100,
+    "train_size": 0.8,
+    "val_size": 0.1,
 }
 
 # Prefix of each parameter in the combination folder name, e.g. norm1_do0.1_a0.005_lr0.0003_l2.

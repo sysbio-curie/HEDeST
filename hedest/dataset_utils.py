@@ -10,8 +10,8 @@ from sklearn.model_selection import train_test_split
 def split_data(
     spot_dict: dict[str, list[str]],
     spot_prop_df: pd.DataFrame,
-    train_size: float = 0.7,
-    val_size: float = 0.15,
+    train_size: float = 0.8,
+    val_size: float = 0.1,
     rs: int = 42,
 ) -> tuple[dict[str, list[str]], pd.DataFrame, dict[str, list[str]], pd.DataFrame, dict[str, list[str]], pd.DataFrame]:
     """
@@ -21,8 +21,8 @@ def split_data(
         spot_dict: Dictionary containing {spot_id: list of cell IDs}.
         spot_prop_df: DataFrame where each row corresponds to a spot and columns
                       represent cell type proportions.
-        train_size: Proportion of the dataset to use for training. Defaults to 0.7.
-        val_size: Proportion of the dataset to use for validation. Defaults to 0.15.
+        train_size: Proportion of the dataset to use for training. Defaults to 0.8.
+        val_size: Proportion of the dataset to use for validation. Defaults to 0.1.
         rs: Random state for reproducibility. Defaults to 42.
 
     Returns:

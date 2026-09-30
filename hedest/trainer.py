@@ -38,8 +38,8 @@ class ModelTrainer:
         val_loader: DataLoader,
         test_loader: DataLoader,
         divergence: str = "l2",
-        alpha: float = 0.0,
-        num_epochs: int = 60,
+        alpha: float = 0.01,
+        num_epochs: int = 100,
         out_dir: str = "results",
         rs: int = 42,
     ) -> None:

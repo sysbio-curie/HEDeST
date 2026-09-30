@@ -76,19 +76,19 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "path_st_adata": None,
         "adata_name": None,
         "spot_dict_file": None,
-        "hidden_dims": "512,256",
-        "norm": False,
+        "hidden_dims": "1024,512",
+        "norm": True,
         "dropout": 0.0,
         "batch_size": 64,
         "lr": 0.0001,
         "divergence": "l2",
-        "alpha": 0.0,
+        "alpha": 0.01,
         "beta": 0.0,
         "adjustment": "interpolated",
         "gated": False,
-        "epochs": 60,
-        "train_size": 0.7,
-        "val_size": 0.15,
+        "epochs": 100,
+        "train_size": 0.8,
+        "val_size": 0.1,
         "save_geojson": False,
         "color_dict_file": None,
         "rs": 42,
@@ -131,19 +131,19 @@ train:
   path_st_adata: /path/to/adata.h5ad         # needed to map cells to spots and for PPSA
   adata_name: null                           # null = first sample of adata.uns['spatial']
   spot_dict_file: null                       # null = computed from the adata and the segmentation
-  hidden_dims: "512,256"
-  norm: false
+  hidden_dims: "1024,512"
+  norm: true
   dropout: 0.0
   batch_size: 64
   lr: 0.0001
   divergence: l2
-  alpha: 0.0
+  alpha: 0.01
   beta: 0.0
   adjustment: interpolated       # PPSA for the cells outside spots: interpolated | nearest
   gated: false                   # true = adjust only the cells inside spots
-  epochs: 60
-  train_size: 0.7
-  val_size: 0.15
+  epochs: 100
+  train_size: 0.8
+  val_size: 0.1
   save_geojson: false
   color_dict_file: null
   rs: 42

@@ -47,7 +47,7 @@ def load_model(
     num_classes: int,
     embed_size: int,
     hidden_dims: List[int],
-    norm: bool = False,
+    norm: bool = True,
     dropout: float = 0.0,
 ) -> CellClassifier:
     """

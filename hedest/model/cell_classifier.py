@@ -13,8 +13,8 @@ class CellClassifier(BaseCellClassifier):
         self,
         num_classes: int,
         embed_size: int,
-        hidden_dims: list = [512, 256],
-        norm: bool = False,
+        hidden_dims: list = [1024, 512],
+        norm: bool = True,
         dropout: float = 0.0,
         device: torch.device = torch.device("cpu"),
     ):
