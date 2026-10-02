@@ -35,6 +35,28 @@ The pinned builds target linux-x86_64 with a CUDA GPU (cu116 for hedest-env, cu1
 conda activate hedest-env
 ```
 
+### The model weights
+
+Two sets of weights are needed, and neither ships with the repository.
+
+**HoVer-Net** (nuclei segmentation). Download the PanNuke checkpoint
+``hovernet_fast_pannuke_type_tf2pytorch.tar`` from the [HoVer-Net repository](https://github.com/vqdang/hover_net#model-weights),
+put it wherever you like and give its path as ``segmentation.model_path`` in the pipeline configuration.
+
+**H-Optimus-0** (cell embeddings). It is a **gated** model on the Hugging Face hub, so it cannot simply be downloaded:
+
+1. Ask for access on the model page, https://huggingface.co/bioptimus/H-optimus-0, and wait for it to be granted.
+2. Authenticate the machine once, either with ``huggingface-cli login`` or by exporting a token with ``export HF_TOKEN=hf_...``.
+3. The first run downloads about 4.3 GB into ``~/.cache/huggingface/hub/models--bioptimus--H-optimus-0``; every later run reads the cache.
+
+Three precautions are worth knowing:
+
+- **The cache is the weights.** Once it is there, HEDeST reads it first and never calls the hub, so the embeddings keep working with no network, with an expired token, or on a cluster node that has no outbound access. To move the model to such a machine, copy that cache directory over — nothing else is needed.
+- **Do not let the cache be split across machines.** Set ``HF_HOME`` (or ``HF_HUB_CACHE``) to a shared path if the home directory is not shared, otherwise every node downloads its own copy.
+- **A 401 means the gate, not the network.** ``GatedRepoError: 401 ... Access to model bioptimus/H-optimus-0 is restricted`` means the token is missing, expired, or belongs to an account whose request was never granted. HEDeST turns this into an explicit message telling you which of the two to fix; it is never a reason to re-download anything.
+
+Nothing has to be configured for any of this: ``hedest/features/hoptimus.py`` tries the cache, then the hub.
+
 ## Code structure
 The code is structured as follows :
 ```
@@ -43,6 +65,9 @@ hedest/              → Source code for HEDeST and analysis tools
   main.py            → HEDeST training alone
   features/          → Cell feature extraction (H-Optimus-0)
   slide.py           → Slide checking and conversion to pyramidal TIFF
+  spots.py           → Spot geometry and cell-to-spot mapping
+  aggregate_seeds.py → Combines the seeds of one study
+  analysis/          → Visualization and analysis of the predictions
 gridsearch/          → Parameter gridsearch against ground truth cell types
 benchmark/           → Benchmarking notebooks
 case_study/          → Notebook for the case study (tutorial)
@@ -115,6 +140,52 @@ Prior Probability Shift Adjustment (highly recommended) is applied automatically
 Adjusting the cells outside spots requires the HoverNet segmentation .json file, the AnnData object for your slide and the slide name. Without them only the cells inside spots are adjusted, and a warning tells you so. Gated runs and fully simulated datasets need none of the three.
 
 The spot diameter in AnnData objects is for visualization purposes only. Pass ``--mpp`` (microns per pixel) so the real diameter is used instead (diameter = 55 / mpp); the pipeline does it for you. To find your mpp, use ``external/hovernet/get_tiff_resolution.py``, ``python hedest/pipeline.py check slide.tif``, or open the image in QuPath.
+
+### Several seeds
+
+HEDeST is supervised at the spot level, so different seeds can assign a given cell differently while fitting the spots equally well. Running a few seeds and averaging them gives a better prediction, and how much they agree is a confidence measure that needs no ground truth:
+```
+for seed in 0 1 2 3 4; do python hedest/main.py ... --out-dir results/seed_${seed} --rs $seed; done
+python hedest/aggregate_seeds.py results/ --json-path seg/slide.json
+```
+This writes ``info_aggregated.pickle`` (mean predictions, per-cell spread and agreement) and ``stats_aggregated.xlsx`` next to the seed folders.
+
+## Analysing the results
+
+Each run writes ``info.pickle`` (everything the analysis needs) and ``stats.xlsx`` (the same numbers as a spreadsheet: composition per cell type, and how well the per-spot means reproduce the deconvolution, on all spots and on the held-out ones).
+
+For anything more, open the run with ``hedest.analysis``. **A ground truth is never required** — it is assumed you do not have one:
+```python
+from hedest.analysis import PredAnalyzer, load_run
+
+run = load_run("results")                 # a run, or a folder of seed_* runs
+analyzer = PredAnalyzer(run, seg="seg/slide.json", slide_path="slide.tif",
+                        adata=adata, adata_name="sample", mpp=0.2754)
+
+analyzer.describe()                       # what this run is
+analyzer.spot_metrics(subset="held_out")  # does it reproduce the deconvolution?
+analyzer.plot_proportion_scatter()
+analyzer.visualizer().plot_celltype_map() # every cell, coloured, over the whole slide
+analyzer.export_predictions("cells.csv")  # or .export_geojson(...) for QuPath
+```
+
+The package is organised as:
+- ``analysis.loaders`` — ``load_run`` / ``load_seed_runs``, which read a run directory.
+- ``analysis.pred_analyzer`` — ``PredAnalyzer``: composition, spot-level metrics, confidence, the effect of the adjustment, cell crops, morphology, neighbourhoods, exports. With a ground truth (``set_ground_truth``) it also gives cell-level metrics and a confusion matrix.
+- ``analysis.postseg`` — ``SlideVisualizer``: the slide with the segmentation, the spots or the predictions drawn on it, zoomable through plotly. It needs no run, so it is also the way to check a segmentation before training. Windows are given in full-resolution coordinates and large ones are downsampled automatically.
+- ``analysis.seeds`` — ``SeedEnsemble``: agreement between seeds, per cell and per cell type.
+- ``analysis.plots`` and ``analysis.palette`` — the stateless helpers and the colour of each cell type.
+
+Every plotting function returns a closed matplotlib figure: display it as the value of a notebook cell, or pass ``savefig=``.
+
+Colours come from a single ``Palette``, so a cell type keeps its colour across every plot, overlay and export. One is built from the cell types when you do not give one; to impose your own, pass ``palette=`` to ``PredAnalyzer`` and ``SlideVisualizer``:
+```python
+from hedest.analysis.palette import Palette
+
+palette = Palette.from_colors({"T": "#d62728", "B": "tab:blue"}, names=run.ct_list)
+analyzer = PredAnalyzer(run, palette=palette, ...)
+```
+Any matplotlib colour works, the cell types you leave out keep their default colour, and ``palette_from_yaml`` rebuilds the palette a run was exported with from the colour dictionary written next to its GeoJSON.
 
 ## Tutorial
 
@@ -201,4 +272,4 @@ https://www.biorxiv.org/content/10.64898/2026.01.06.697922v1
 }
 ```
 ## Credits
-We would like to thank the authors of HoVerNet (https://github.com/vqdang/hover_net), CellViT (https://github.com/TIO-IKIM/CellViT) and MoCo-v3 (https://github.com/facebookresearch/moco-v3), whose work we adapted for this project.
+We would like to thank the authors of HoVerNet (https://github.com/vqdang/hover_net), CellViT (https://github.com/TIO-IKIM/CellViT), MoCo-v3 (https://github.com/facebookresearch/moco-v3) and H-Optimus-0 (https://huggingface.co/bioptimus/H-optimus-0), whose work we adapted for this project.
