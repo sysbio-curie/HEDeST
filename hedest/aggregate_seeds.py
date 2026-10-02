@@ -1,164 +1,114 @@
+"""
+Combining the seeds of one HEDeST study.
+
+HEDeST is supervised by spot-level proportions only, so different seeds can assign a given
+cell differently while fitting the spots equally well. Averaging a handful of seeds gives a
+better prediction, and the spread between them is a confidence measure that costs nothing
+extra.
+
+This script reads every ``seed_*/info.pickle`` of a directory and writes, next to them:
+
+- ``info_aggregated.pickle`` — the mean predictions, plus the per-cell standard deviation
+  and the per-cell seed agreement, loadable with ``load_run``;
+- ``stats_aggregated.xlsx`` — the usual statistics, with two extra sheets on the seeds;
+- ``hedest_predictions_aggregated*.geojson`` — the aggregated labels for QuPath, when the
+  segmentation is given.
+
+Usage::
+
+    python hedest/aggregate_seeds.py <run_dir> [--json-path seg.json] [--color-dict-file colors.yaml]
+"""
 from __future__ import annotations
 
 import argparse
-import json
-import logging
-import pickle
 from pathlib import Path
 from typing import Optional
 
-import numpy as np
-import pandas as pd
+from loguru import logger
 
+from hedest.analysis.loaders import AGGREGATED_NAME
+from hedest.analysis.loaders import HedestRun
+from hedest.analysis.loaders import load_seed_runs
+from hedest.analysis.palette import Palette
+from hedest.analysis.palette import palette_from_yaml
 from hedest.analysis.pred_analyzer import PredAnalyzer
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-
-def load_seed_info(run_dir: Path) -> list[dict]:
-    """Load info.pickle for all seed_* subdirectories found in run_dir."""
-    seed_dirs = sorted(run_dir.glob("seed_*"))
-
-    if not seed_dirs:
-        logger.error(f"No seed_* directories found in {run_dir}")
-        return []
-
-    # Ensure the folder contains only seed_* subdirectories (and no unexpected ones)
-    all_subdirs = [p for p in run_dir.iterdir() if p.is_dir()]
-    unexpected = [p for p in all_subdirs if not p.name.startswith("seed_")]
-    if unexpected:
-        logger.warning(
-            f"Unexpected subdirectories found: {[p.name for p in unexpected]}. Aggregating only seed_* folders."
-        )
-
-    infos = []
-    for seed_dir in seed_dirs:
-        seed_path = seed_dir / "info.pickle"
-        if not seed_path.exists():
-            logger.warning(f"[SKIP] No info.pickle in {seed_dir}")
-            continue
-        with open(seed_path, "rb") as f:
-            info = pickle.load(f)
-        logger.info(f"[LOAD] {seed_dir.name} loaded.")
-        infos.append(info)
-    return infos
+from hedest.analysis.seeds import SeedEnsemble
+from hedest.analysis.stats import write_stats
 
 
-def aggregate_seeds(run_dir: Path, json_path: Optional[str] = None, color_dict_file: Optional[str] = None):
+def aggregate_seeds(
+    run_dir: Path,
+    json_path: Optional[str] = None,
+    color_dict_file: Optional[str] = None,
+) -> Optional[HedestRun]:
+    """
+    Aggregates every seed run of a directory.
 
-    infos = load_seed_info(run_dir)
+    Args:
+        run_dir: Directory holding the ``seed_*`` subdirectories.
+        json_path: Path to the segmentation JSON, to also export the GeoJSON files.
+        color_dict_file: YAML colour dictionary to keep the colours of an earlier export.
 
-    if not infos:
-        logger.error("No seed results found. Aborting aggregation.")
-        return
+    Returns:
+        The aggregated run, or None when no seed was found.
+    """
 
-    logger.info(f"Aggregating {len(infos)} seeds...")
+    run_dir = Path(run_dir)
+    runs = load_seed_runs(run_dir)
 
-    preds_best = []
-    preds_best_adjusted = []
-    for info in infos:
-        preds_best.append(PredAnalyzer(model_info=info, adjusted=False).predictions)
-        preds_best_adjusted.append(PredAnalyzer(model_info=info, adjusted=True).predictions)
+    if not runs:
+        logger.error(f"No seed_*/info.pickle found under {run_dir}. Nothing to aggregate.")
+        return None
 
-    avg_pred_best = np.mean(preds_best, axis=0)
-    avg_pred_best_adjusted = np.mean(preds_best_adjusted, axis=0)
+    logger.info(f"Aggregating {len(runs)} seeds: {[run.run_dir.name for run in runs if run.run_dir]}")
+    ensemble = SeedEnsemble(runs)
+    aggregated = ensemble.to_run(run_dir=run_dir)
+    aggregated.save(run_dir / AGGREGATED_NAME)
 
-    ref = infos[0]
-    if isinstance(ref["preds"]["pred_best"], pd.DataFrame):
-        avg_pred_best = pd.DataFrame(
-            avg_pred_best,
-            index=ref["preds"]["pred_best"].index,
-            columns=ref["preds"]["pred_best"].columns,
-        )
-        avg_pred_best_adjusted = pd.DataFrame(
-            avg_pred_best_adjusted,
-            index=ref["preds"]["pred_best_adjusted"].index,
-            columns=ref["preds"]["pred_best_adjusted"].columns,
-        )
+    agreement = ensemble.agreement()
+    logger.info(
+        f"-> mean seed agreement {agreement.mean():.3f}, unanimous on "
+        f"{float((agreement == 1.0).mean()):.1%} of the {len(agreement)} cells."
+    )
 
-    agg_info = {
-        "model_name": ref["model_name"],
-        "hidden_dims": ref["hidden_dims"],
-        "norm": ref["norm"],
-        "dropout": ref["dropout"],
-        "spot_dict": ref["spot_dict"],
-        "train_spot_dict": ref["train_spot_dict"],
-        "proportions": ref["proportions"],
-        "preds": {
-            "pred_best": avg_pred_best,
-            "pred_best_adjusted": avg_pred_best_adjusted,
-        },
-    }
+    write_stats(run_dir / "stats_aggregated.xlsx", aggregated, ensemble=ensemble)
 
-    agg_pickle_path = run_dir / "info_aggregated.pickle"
-    with open(agg_pickle_path, "wb") as f:
-        pickle.dump(agg_info, f)
-    logger.info(f"Saved aggregated info to {agg_pickle_path}")
-
-    # ── Stats ─────────────────────────────────────────────────────────────────
-    seg_dict_raw = None
     if json_path is not None:
-        with open(json_path, "r") as f:
-            seg_dict_raw = json.load(f)
-
-    analyzer_best = PredAnalyzer(model_info=agg_info, adjusted=False, seg_dict=seg_dict_raw)
-    analyzer_best_adj = PredAnalyzer(model_info=agg_info, adjusted=True, seg_dict=seg_dict_raw)
-
-    stats_best_predicted = analyzer_best.extract_stats(metric="predicted")
-    stats_best_all = analyzer_best.extract_stats(metric="all")
-    stats_best_adj_predicted = analyzer_best_adj.extract_stats(metric="predicted")
-    stats_best_adj_all = analyzer_best_adj.extract_stats(metric="all")
-
-    agg_stats_path = run_dir / "stats_aggregated.xlsx"
-    with pd.ExcelWriter(agg_stats_path) as writer:
-        stats_best_predicted.to_excel(writer, sheet_name="best_predicted", index=False)
-        stats_best_all.to_excel(writer, sheet_name="best_all", index=False)
-        stats_best_adj_predicted.to_excel(writer, sheet_name="best_adj_predicted", index=False)
-        stats_best_adj_all.to_excel(writer, sheet_name="best_adj_all", index=False)
-    logger.info(f"Saved aggregated stats to {agg_stats_path}")
-
-    # ── GeoJSON export ────────────────────────────────────────────────────────
-    if seg_dict_raw is not None:
-        import yaml
-        from hedest.utils import seg_dict_to_geojson, generate_color_dict
-
-        ct_list = list(ref["proportions"].columns)
-
         if color_dict_file is not None:
-            with open(color_dict_file, "r") as f:
-                color_dict = yaml.safe_load(f)
+            import yaml
+
+            with open(color_dict_file) as color_file:
+                palette = palette_from_yaml(yaml.safe_load(color_file))
         else:
-            color_dict = generate_color_dict(ct_list, format="special")
-            auto_color_path = run_dir / "auto_color_dict.yaml"
-            with open(auto_color_path, "w") as f:
-                yaml.dump(color_dict, f)
-            logger.info(f"Auto-generated color dict saved to {auto_color_path}")
+            palette = Palette(aggregated.ct_list)
 
-        seg_dict_to_geojson(
-            analyzer_best.seg_dict_w_class,
-            str(run_dir / "hedest_predictions_aggregated.geojson"),
-            color_dict=color_dict,
-        )
-        logger.info(f"GeoJSON (unadjusted) exported to {run_dir / 'hedest_predictions_aggregated.geojson'}")
+        for adjusted, name in (
+            (True, "hedest_predictions_aggregated_adj.geojson"),
+            (False, "hedest_predictions_aggregated.geojson"),
+        ):
+            analyzer = PredAnalyzer(aggregated, seg=json_path, palette=palette, adjusted=adjusted)
+            analyzer.export_geojson(run_dir / name)
 
-        seg_dict_to_geojson(
-            analyzer_best_adj.seg_dict_w_class,
-            str(run_dir / "hedest_predictions_adj_aggregated.geojson"),
-            color_dict=color_dict,
-        )
-        logger.info(f"GeoJSON (adjusted) exported to {run_dir / 'hedest_predictions_adj_aggregated.geojson'}")
+    logger.info(f"Aggregation finished in {run_dir}")
+
+    return aggregated
+
+
+def main() -> None:
+    """Command-line entry point."""
+
+    parser = argparse.ArgumentParser(description="Aggregate the seed runs of a HEDeST study.")
+    parser.add_argument("run_dir", type=Path, help="Directory holding the seed_* subdirectories.")
+    parser.add_argument("--json-path", default=None, help="Segmentation JSON, to export the GeoJSON files too.")
+    parser.add_argument("--color-dict-file", default=None, help="YAML colour dictionary (special format).")
+    arguments = parser.parse_args()
+
+    aggregate_seeds(
+        run_dir=arguments.run_dir,
+        json_path=arguments.json_path,
+        color_dict_file=arguments.color_dict_file,
+    )
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser("HEDeST Seed Aggregator")
-    parser.add_argument("--run-dir", type=Path, required=True)
-    parser.add_argument("--json-path", type=str, default=None)
-    parser.add_argument("--color-dict-file", type=str, default=None)
-    args = parser.parse_args()
-
-    aggregate_seeds(
-        run_dir=args.run_dir,
-        json_path=args.json_path,
-        color_dict_file=args.color_dict_file,
-    )
+    main()

@@ -59,7 +59,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "nr_types": 6,
         "model_mode": "fast",
         "batch_size": 16,
-        "gpu": "0",
+        "gpu": None,
         "proc_mag": 40,
         "cache_path": "cache",
         "save_geojson": False,
@@ -114,7 +114,8 @@ segmentation:
   nr_types: 6
   model_mode: fast
   batch_size: 16
-  gpu: "0"
+  gpu: null                      # null = the GPU(s) CUDA_VISIBLE_DEVICES points at,
+                                 # which is what the scheduler allocated; "0" if unset
   proc_mag: 40
   cache_path: /path/to/cache
   save_geojson: false
@@ -238,6 +239,30 @@ def _paths(config: Dict[str, Any]) -> Dict[str, Any]:
         "model_dir": out_dir / "model",
         "state": out_dir / "pipeline.json",
     }
+
+
+def _gpu(configured: Optional[str]) -> str:
+    """
+    Decides which GPU HoVer-Net is told to use.
+
+    HoVer-Net overwrites ``CUDA_VISIBLE_DEVICES`` with the value of its ``--gpu`` option, and
+    that value is a *physical* index, so a hard-coded "0" ignores the GPU a scheduler
+    allocated and lands on whichever device is numbered 0 on the node, which on a shared
+    machine is usually someone else's. Following the allocation avoids that.
+
+    Args:
+        configured: The ``segmentation.gpu`` of the configuration, None to decide here.
+
+    Returns:
+        The value to give to ``--gpu``.
+    """
+
+    if configured is not None:
+        return str(configured)
+
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
+
+    return visible if visible else "0"
 
 
 def _mask_path(paths: Dict[str, Any], state: Dict[str, Any]) -> Path:
@@ -497,7 +522,7 @@ def stage_segment(config: Dict[str, Any], paths: Dict[str, Any], state: Dict[str
         interpreter,
         "-u",
         str(repo_root() / "external" / "hovernet" / "run_infer.py"),
-        f"--gpu={segmentation['gpu']}",
+        f"--gpu={_gpu(segmentation.get('gpu'))}",
         f"--nr_types={segmentation['nr_types']}",
         f"--type_info_path={segmentation['type_info_path']}",
         f"--batch_size={segmentation['batch_size']}",

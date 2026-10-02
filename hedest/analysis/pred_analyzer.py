@@ -1,1337 +1,1538 @@
+"""
+Analysing the predictions of a HEDeST run.
+
+:class:`PredAnalyzer` wraps one run (or one aggregate of seeds) and everything optional that
+makes it richer: the slide, the segmentation, the spots, the cell crops and, when it exists,
+a ground truth.
+
+**Ground truth is optional everywhere.** In practice nobody has per-cell labels, so the
+default answer to "is this run any good" is built from the spots: HEDeST is trained to
+reproduce the deconvolution proportions, so the per-spot means of its predictions should
+match them, and that comparison needs nothing extra. The methods that do need labels say so
+by name (:meth:`cell_metrics`, :meth:`plot_confusion_matrix`) and raise a clear error
+without them.
+
+Typical use::
+
+    from hedest.analysis import PredAnalyzer
+
+    analyzer = PredAnalyzer(
+        "results/my_run",
+        seg="seg/slide.json",
+        slide_path="slide.tif",
+        adata=adata, adata_name="sample",
+        mpp=0.2738,
+    )
+    analyzer.describe()
+    analyzer.plot_proportion_scatter()
+    analyzer.visualizer().plot_celltype_map()
+"""
 from __future__ import annotations
 
-import pickle
-import random
-from collections import Counter
 from collections import defaultdict
+from collections.abc import Sequence
+from pathlib import Path
 from typing import Any
 from typing import Dict
 from typing import List
 from typing import Optional
-from typing import Set
+from typing import Tuple
 from typing import Union
 
 import matplotlib.gridspec as gridspec
 import matplotlib.pyplot as plt
-import networkx as nx
 import numpy as np
 import pandas as pd
-import seaborn as sns
-from matplotlib.patches import FancyArrowPatch
-from matplotlib.patches import PathPatch
-from matplotlib.path import Path
+from anndata import AnnData
+from loguru import logger
+from matplotlib.figure import Figure
 from scipy.spatial import Delaunay
 from scipy.stats import mannwhitneyu
 from scipy.stats import pearsonr
 from scipy.stats import spearmanr
-from sklearn.metrics import accuracy_score
-from sklearn.metrics import balanced_accuracy_score
-from sklearn.metrics import confusion_matrix
-from sklearn.metrics import f1_score
-from sklearn.metrics import mean_absolute_error
-from sklearn.metrics import mean_squared_error
-from sklearn.metrics import precision_score
-from sklearn.metrics import recall_score
 
-from hedest.analysis.plots import plot_grid_celltype
-from hedest.analysis.plots import plot_history
-from hedest.analysis.plots import plot_legend
-from hedest.analysis.plots import plot_mosaic_cells
-from hedest.analysis.plots import plot_pie_chart
-from hedest.analysis.plots import plot_predicted_cell_labels_in_spot
-from hedest.analysis.plots import polygon_area
-from hedest.analysis.postseg import StdVisualizer
-from hedest.utils import fig_to_array
-from hedest.utils import generate_color_dict
-from hedest.utils import require_attributes
+from hedest.analysis import plots
+from hedest.analysis.loaders import HedestRun
+from hedest.analysis.loaders import load_run
+from hedest.analysis.palette import Palette
+from hedest.analysis.seeds import prediction_entropy
+from hedest.spots import cells_in_spots
+from hedest.spots import load_seg_dict
 
 
 class PredAnalyzer:
     """
-    A class to analyze predictions made by a cell classifier.
+    Everything that can be said about the predictions of a run.
+
+    Attributes:
+        run: The run being analysed.
+        predictions: Cells x cell types probability table (adjusted unless asked otherwise).
+        ct_list: The cell types, in model-class order.
+        palette: The colour of each cell type.
+        labels: Predicted cell type per cell.
+        confidence: Probability of the predicted cell type, per cell.
+        spot_dict: Spot id to the cells it holds.
+        proportions: The deconvolution proportions the run was trained on.
     """
 
-    EXPECTED_VARIABLES = {
-        "model_name",
-        "hidden_dims",
-        "norm",
-        "dropout",
-        "spot_dict",
-        "train_spot_dict",
-        "proportions",
-        "history",
-        "preds",
-        "image_dict",
-        "image_path",
-        "adata",
-        "adata_name",
-        "seg_dict",
-        "ground_truth",
-        "adjustment",
-        "gated",
-    }
-
-    def __init__(self, adjusted: bool = True, model_info: Optional[Union[dict, str]] = None, **kwargs):
+    def __init__(
+        self,
+        run: Union[HedestRun, str, Path, Dict[str, Any]],
+        seg: Optional[Union[str, Dict[str, Any]]] = None,
+        slide_path: Optional[str] = None,
+        adata: Optional[AnnData] = None,
+        adata_name: Optional[str] = None,
+        image_dict: Optional[Dict[str, Any]] = None,
+        mpp: Optional[float] = None,
+        ground_truth: Optional[Union[pd.DataFrame, pd.Series, Dict[str, str]]] = None,
+        palette: Optional[Palette] = None,
+        adjusted: bool = True,
+    ) -> None:
         """
-        Initializes PredAnalyzer with variables from a dictionary or a pickle file containing model informations
-        and predictions. All variables can be None, except for 'preds' which must be provided. You can add more
-        attributes dynamically using the `add_attributes` method.
+        Builds an analyzer around a run.
 
         Args:
-            adjusted: Whether to use adjusted predictions.
-            model_info: Model information provided as:
-                - A dictionary with variable data.
-                - A path to a pickle file.
-            **kwargs: Additional variables to add dynamically.
+            run: A :class:`~hedest.analysis.loaders.HedestRun`, a path to a run directory or
+                to an ``info.pickle``, or the unpickled dictionary itself.
+            seg: Segmentation dictionary or path to the HoVer-Net JSON. Needed for anything
+                that involves positions, contours or neighbours.
+            slide_path: Path to the slide. Needed for the views that show tissue.
+            adata: AnnData object of the sample, for the spots.
+            adata_name: Key under ``adata.uns['spatial']``.
+            image_dict: Cell crops, keyed by cell id, as saved by the segmentation stage.
+                Only needed for the crop mosaics.
+            mpp: Microns per pixel. Used for real spot diameters and for areas and distances
+                in microns.
+            ground_truth: Optional per-cell truth, either a cells x cell types table or a
+                mapping from cell id to cell type.
+            palette: Colours to use. Built from the cell types when not given.
+            adjusted: Whether to analyse the adjusted predictions.
         """
 
-        self.seg_dict_w_class = None
-        self.delaunay_neighbors = None
-        self.neighborhood_aggregates = None
-        self.adjusted = adjusted
-        self.model_info = {}
+        if isinstance(run, (str, Path)):
+            run = load_run(run, adjusted=adjusted)
+        elif isinstance(run, dict):
+            from hedest.analysis.loaders import _from_dict
 
-        # Load data from pickle if provided
-        if model_info:
-            if isinstance(model_info, dict):
-                self.model_info = model_info
-            elif isinstance(model_info, str):
-                with open(model_info, "rb") as file:
-                    self.model_info = pickle.load(file)
-            else:
-                raise ValueError("Invalid model_info type. Must be a dictionary or a path to a pickle file.")
+            run = _from_dict(run, None, adjusted)
+        elif adjusted != run.adjusted:
+            run = run.use(adjusted)
 
-        # Update with kwargs
-        self.model_info.update(kwargs)
+        self.run = run
+        self.predictions = run.predictions
+        self.ct_list = run.ct_list
+        self.palette = palette or Palette(self.ct_list)
+        missing = [name for name in self.ct_list if name not in self.palette]
+        if missing:
+            logger.warning(f"The palette has no colour for {missing}; those cells will be drawn grey.")
+        self.spot_dict = run.spot_dict
+        self.proportions = run.proportions
+        self.mpp = mpp
 
-        unexpected_variables = set(self.model_info.keys()) - self.EXPECTED_VARIABLES
-        if unexpected_variables:
-            raise ValueError(
-                f"Unexpected keys: {unexpected_variables}. " f"Expected keys are: {self.EXPECTED_VARIABLES}"
-            )
+        self.slide_path = slide_path
+        self.adata = adata
+        self.adata_name = adata_name
+        self.image_dict = image_dict
 
-        # Dynamic attribute assignment
-        for key in self.EXPECTED_VARIABLES:
-            setattr(self, key, self.model_info.get(key, None))
+        self.seg_dict: Optional[Dict[str, Any]] = load_seg_dict(seg) if seg is not None else None
 
-        assert self.preds is not None, "The 'preds' attribute must be provided and cannot be None."
-        assert self.spot_dict is not None, "The 'spot_dict' attribute must be provided and cannot be None."
+        self.labels = self.predictions.idxmax(axis=1).rename("cell_type")
+        self.confidence = self.predictions.max(axis=1).rename("confidence")
 
-        if self.adjusted:
-            self.predictions = self.preds["pred_best_adjusted"]
-        else:
-            self.predictions = self.preds["pred_best"]
+        self.true_labels: Optional[pd.Series] = None
+        self.ground_truth: Optional[pd.DataFrame] = None
+        if ground_truth is not None:
+            self.set_ground_truth(ground_truth)
 
-        self.ct_list = list(self.predictions.columns)
-        self.color_dict = generate_color_dict(self.ct_list, format="special")
+        # Filled on demand, because each is expensive on a slide with 10^5 cells.
+        self._predicted_proportions: Optional[pd.DataFrame] = None
+        self._centroids: Optional[pd.DataFrame] = None
+        self._areas: Optional[pd.Series] = None
+        self._edge_cache: Optional[np.ndarray] = None
+        self._edges_key: Optional[Tuple[Any, Any]] = None
 
-        print("Loading predicted labels...")
-        self.predicted_labels = self._get_labels_slide(self.predictions)
-        self.predicted_proportions = self._get_predicted_proportions()
-
-        all_spots = set(self.spot_dict.keys())
-        all_cells = {cell for cell_list in self.spot_dict.values() for cell in cell_list}
-        if self.train_spot_dict is not None:
-            self.train_spots = list(self.train_spot_dict.keys())
-            self.train_cells = list({cell for cell_list in self.train_spot_dict.values() for cell in cell_list})
-            self.no_train_spots = list(all_spots - set(self.train_spots))
-            self.no_train_cells = list(all_cells - set(self.train_cells))
-
-        if self.ground_truth is not None:
-            print("Loading true labels...")
-            self.true_labels = self._get_labels_slide(self.ground_truth)
-
-        if self.history is not None:
-            self.history_train = self.history["train"]
-            self.history_val = self.history["val"]
-
-        else:
-            print("Warning : No history provided. You won't be able to plot the training and validation histories.")
-            print("Use `add_attributes(history=your_history)` to add one.")
-
-        if self.seg_dict is not None:
-            self._generate_dicts_viz_pred(self.seg_dict)
-
-        else:
-            print("Warning : No segmentation provided. You won't be able to plot the segmentation.")
-            print("Use `add_attributes(seg_dict=your_seg_dict)` to add one.")
+        train_spots = set(run.train_spot_dict or {})
+        self.train_spots = sorted(train_spots)
+        self.held_out_spots = sorted(set(self.spot_dict) - train_spots)
+        self.train_cells = sorted(cells_in_spots(run.train_spot_dict or {}))
+        self.held_out_cells = sorted(cells_in_spots(self.spot_dict) - set(self.train_cells))
 
     def __repr__(self) -> str:
+        extras = [
+            name
+            for name, value in (
+                ("seg", self.seg_dict),
+                ("slide", self.slide_path),
+                ("adata", self.adata),
+                ("crops", self.image_dict),
+                ("ground_truth", self.true_labels),
+            )
+            if value is not None
+        ]
+
+        return (
+            f"PredAnalyzer({len(self.predictions)} cells, {len(self.ct_list)} cell types, "
+            f"{len(self.spot_dict)} spots, adjusted={self.run.adjusted}, "
+            f"attached=[{', '.join(extras) or 'nothing'}])"
+        )
+
+    # ------------------------------------------------------------------ inputs
+
+    def set_ground_truth(self, ground_truth: Union[pd.DataFrame, pd.Series, Dict[str, str]]) -> "PredAnalyzer":
         """
-        Returns a string representation of the PredAnalyzer instance.
-
-        Returns:
-            A string containing all expected attributes and their values.
-        """
-
-        attrs = ", ".join(f"{k}={getattr(self, k, None)}" for k in self.EXPECTED_VARIABLES)
-        return f"PredAnalyzer({attrs})"
-
-    @classmethod
-    def expected_variables(cls) -> Set[str]:
-        """
-        Gets the set of expected variable keys.
-
-        Returns:
-            Expected variable keys.
-        """
-
-        return cls.EXPECTED_VARIABLES
-
-    def add_attributes(self, **kwargs) -> None:
-        """
-        Dynamically adds attributes to the instance if they are in EXPECTED_VARIABLES.
+        Attaches a per-cell ground truth.
 
         Args:
-            **kwargs: Attribute names and values to add.
-
-        Raises:
-            ValueError: If any key is not in EXPECTED_VARIABLES.
-        """
-
-        for key, value in kwargs.items():
-            if key not in self.EXPECTED_VARIABLES:
-                raise ValueError(
-                    f"Cannot add attribute '{key}', " f"it is not in the expected keys: {self.EXPECTED_VARIABLES}"
-                )
-
-            elif key == "ground_truth":
-                self.true_labels = self._get_labels_slide(value)
-
-            elif key == "history":
-                self.history_train = value["train"]
-                self.history_val = value["val"]
-
-            elif key == "seg_dict":
-                self._generate_dicts_viz_pred(value)
-
-            setattr(self, key, value)
-
-    def list_attributes(self) -> Dict[str, Any]:
-        """
-        Returns all current attributes of the instance.
+            ground_truth: Either a cells x cell types table, whose row-wise maximum gives
+                the true cell type, or a mapping from cell id to cell type.
 
         Returns:
-            Dictionary of current attributes.
+            The analyzer, so calls can be chained.
         """
 
-        return {key: getattr(self, key, None) for key in self.EXPECTED_VARIABLES}
-
-    def extract_stats(self, metric: str = "predicted") -> pd.DataFrame:
-        """
-        Extracts statistics from predictions. You can choose to extract statistics based on either
-        predicted labels or all predictions.
-
-        Args:
-            metric: Metric to use, either "predicted" or "all".
-
-        Returns:
-            pd.DataFrame: DataFrame containing class-wise statistics.
-
-        Raises:
-            ValueError: If an invalid metric is specified.
-        """
-
-        stats = {}
-        ct_list = list(self.predictions.columns)
-
-        if metric == "predicted":
-            for cell_id, pred in self.predicted_labels.items():
-                max_prob = self.predictions.loc[cell_id].max()
-
-                if pred["cell_type"] not in stats:
-                    stats[pred["cell_type"]] = {"probs": [], "count": 0}
-
-                stats[pred["cell_type"]]["probs"].append(max_prob)
-                stats[pred["cell_type"]]["count"] += 1
-
-            data = []
-            for ct, class_stats in stats.items():
-                class_probs = class_stats["probs"]
-                row = [
-                    self.predictions.columns.get_loc(ct),
-                    ct,
-                    np.min(class_probs),
-                    np.max(class_probs),
-                    np.median(class_probs),
-                    np.mean(class_probs),
-                    class_stats["count"],
-                ]
-                data.append(row)
-
-            columns = ["Class", "CT", "Min Prob", "Max Prob", "Median Prob", "Mean Prob", "Cell Count"]
-            df_stats = pd.DataFrame(data, columns=columns)
-
-        elif metric == "all":
-            for ct in ct_list:
-                stats[ct] = []
-
-            for _, prob_vector in self.predictions.iterrows():
-                for class_id, prob in enumerate(prob_vector):
-                    stats[ct_list[class_id]].append(prob)
-
-            data = []
-            for ct, class_probs in stats.items():
-                row = [
-                    self.predictions.columns.get_loc(ct),
-                    ct,
-                    np.min(class_probs),
-                    np.max(class_probs),
-                    np.median(class_probs),
-                    np.mean(class_probs),
-                ]
-                data.append(row)
-
-            columns = ["Class", "CT", "Min Prob", "Max Prob", "Median Prob", "Mean Prob"]
-            df_stats = pd.DataFrame(data, columns=columns)
-
+        if isinstance(ground_truth, pd.DataFrame):
+            self.ground_truth = ground_truth
+            self.true_labels = ground_truth.idxmax(axis=1).rename("cell_type")
         else:
-            raise ValueError("Invalid metric. Choose 'predicted' or 'all'.")
+            series = pd.Series(ground_truth) if isinstance(ground_truth, dict) else ground_truth
+            self.ground_truth = None
+            self.true_labels = series.astype(str).rename("cell_type")
 
-        df_stats = df_stats.sort_values(by="Class", ascending=True).reset_index(drop=True)
-        df_stats = df_stats.set_index("Class")
+        shared = self.predictions.index.intersection(self.true_labels.index)
+        logger.info(f"Ground truth attached for {len(shared)}/{len(self.predictions)} predicted cells.")
+        unknown = set(self.true_labels.loc[shared].unique()) - set(self.ct_list)
+        if unknown:
+            logger.warning(f"Ground-truth cell types absent from the model: {sorted(unknown)}")
 
-        return df_stats
+        return self
 
-    @require_attributes("history_train", "history_val")
-    def plot_history(self, show: bool = False, savefig: Optional[str] = None) -> None:
+    @property
+    def has_ground_truth(self) -> bool:
+        """Whether a per-cell ground truth is attached."""
+
+        return self.true_labels is not None
+
+    def _require(self, **attributes: Any) -> None:
         """
-        Plots training and validation history.
+        Raises a readable error when an optional input is missing.
 
         Args:
-            show: Whether to display the plot.
-            savefig: File path to save the plot.
+            **attributes: The attributes to check, by the name to show the user.
+        """
+
+        missing = [name for name, value in attributes.items() if value is None]
+        if missing:
+            raise ValueError(
+                f"This needs {', '.join(missing)}, which was not given to PredAnalyzer. "
+                "Pass it to the constructor, or set the attribute on the analyzer."
+            )
+
+    # ------------------------------------------------------------------ derived tables
+
+    @property
+    def predicted_proportions(self) -> pd.DataFrame:
+        """
+        The mean prediction over the cells of each spot: what HEDeST is trained to match.
 
         Returns:
-            Train and validation history of the model.
+            Spots x cell types table, restricted to the spots holding at least one
+            predicted cell.
         """
 
-        return plot_history(self.history_train, self.history_val, show=show, savefig=savefig)
+        if self._predicted_proportions is None:
+            spot_ids = list(self.spot_dict)
+            counts = [len(self.spot_dict[spot_id]) for spot_id in spot_ids]
+            cells = np.concatenate([np.asarray(self.spot_dict[s], dtype=object) for s in spot_ids]) if spot_ids else []
+            owners = np.repeat(np.asarray(spot_ids, dtype=object), counts)
 
-    @require_attributes("spot_dict", "image_dict")
-    def plot_mosaic_cells(
-        self, spot_id: Optional[str] = None, num_cols: int = 8, display: bool = True
-    ) -> Optional[plt.Figure]:
+            rows = self.predictions.index.get_indexer(cells)
+            keep = rows >= 0
+            if not keep.all():
+                logger.info(f"{int((~keep).sum())} cells of spot_dict have no prediction and are ignored.")
+
+            values = self.predictions.to_numpy()[rows[keep]]
+            frame = pd.DataFrame(values, columns=self.ct_list)
+            frame["__spot__"] = owners[keep]
+            grouped = frame.groupby("__spot__", sort=False).mean()
+            grouped.index.name = "spot"
+            self._predicted_proportions = grouped
+
+        return self._predicted_proportions
+
+    @property
+    def centroids(self) -> pd.DataFrame:
         """
-        Plots a grid of individual cell images for a given spot ID.
-
-        Args:
-            spot_id: Spot ID to plot. If None, spot ID will be random.
-            num_cols: Number of columns in the grid.
-            display: Whether to display the plot.
+        Nucleus centroids of the predicted cells.
 
         Returns:
-            Image grid with individual cell images of the same spot.
+            A frame indexed by cell id with ``x`` and ``y`` columns.
         """
 
-        return plot_mosaic_cells(
-            self.spot_dict,
-            self.image_dict,
-            spot_id=spot_id,
-            predicted_labels=self.predicted_labels,
-            true_labels=self.true_labels,
-            num_cols=num_cols,
-            display=display,
-        )
+        if self._centroids is None:
+            self._require(seg=self.seg_dict)
+            nuc = self.seg_dict["nuc"]  # type: ignore[index]
+            cells = [cell_id for cell_id in self.predictions.index if cell_id in nuc]
+            coordinates = np.asarray([nuc[cell_id]["centroid"] for cell_id in cells], dtype="float64")
+            self._centroids = pd.DataFrame(coordinates, index=pd.Index(cells, name="cell_id"), columns=["x", "y"])
 
-    @require_attributes("spot_dict", "image_dict", "image_path", "adata", "adata_name")
-    def plot_predicted_cell_labels_in_spot(
-        self, spot_id: Optional[str] = None, show_labels: bool = True, display: bool = True
-    ) -> Optional[plt.Figure]:
+        return self._centroids
+
+    def cell_areas(self, in_microns: bool = True) -> pd.Series:
         """
-        Plots a spot's visualization with all cell images arranged in a grid.
+        Nucleus area of every predicted cell.
 
         Args:
-            spot_id: Spot ID to plot. If None, spot ID will be random.
-            show_labels: Whether to show predicted labels.
-            display: Whether to display the plot.
+            in_microns: Whether to convert to µm² using ``mpp``. Falls back to pixels, with
+                a warning, when no mpp is known.
 
         Returns:
-            Image spot with cell spots and potentially cell labels.
+            The areas, indexed by cell id.
         """
 
-        return plot_predicted_cell_labels_in_spot(
-            spot_dict=self.spot_dict,
-            adata=self.adata,
-            adata_name=self.adata_name,
-            image_path=self.image_path,
-            image_dict=self.image_dict,
-            predicted_labels=[None, self.predicted_labels][show_labels],
-            true_labels=[None, self.true_labels][show_labels],
-            spot_id=spot_id,
-            display=display,
-        )
+        if self._areas is None:
+            self._require(seg=self.seg_dict)
+            nuc = self.seg_dict["nuc"]  # type: ignore[index]
+            cells = [cell_id for cell_id in self.predictions.index if cell_id in nuc]
+            areas = plots.polygon_areas([nuc[cell_id]["contour"] for cell_id in cells])
+            self._areas = pd.Series(areas, index=pd.Index(cells, name="cell_id"), name="area_px2")
 
-    @require_attributes("spot_dict", "proportions", "image_path", "adata", "adata_name")
-    def plot_spot_proportions(self, spot_id: Optional[str] = None, draw_seg: bool = False) -> None:
+        if not in_microns:
+            return self._areas
+
+        if self.mpp is None:
+            logger.warning("No mpp given, so areas stay in squared pixels.")
+            return self._areas
+
+        return (self._areas * self.mpp**2).rename("area_um2")
+
+    def label_table(self) -> pd.DataFrame:
         """
-        Plots true and predicted cell type proportions for a given spot.
-
-        Args:
-            spot_id: Spot ID to plot. If None, selects a random spot.
-            draw_seg: Whether to draw segmentation overlays.
-        """
-
-        if draw_seg:
-            if self.seg_dict_w_class is None:
-                raise ValueError("You must run `_generate_dicts_viz_pred` before to be able to plot segmentation.")
-
-        if spot_id is None:
-            spot_id = random.choice(list(self.spot_dict.keys()))
-            print(f"Randomly selected spot_id: {spot_id}")
-
-        elif spot_id not in self.spot_dict:
-            raise ValueError(f"Spot ID {spot_id} not found in spot_dict.")
-
-        fig = plt.figure(figsize=(16, 8))
-        gs = gridspec.GridSpec(2, 3, width_ratios=[2, 1, 1])
-
-        ax0 = fig.add_subplot(gs[:, 0])
-        plotter = StdVisualizer(
-            self.image_path,
-            self.adata,
-            self.adata_name,
-            [None, self.seg_dict_w_class][draw_seg],
-            [None, self.color_dict][draw_seg],
-        )
-
-        fig1 = plotter.plot_specific_spot(spot_id=spot_id, display=False)
-        img1 = fig_to_array(fig1)
-        ax0.imshow(img1)
-        ax0.axis("off")
-
-        list_cells = self.spot_dict[spot_id]
-
-        pie_color_dict = generate_color_dict(self.ct_list, format="classic")
-
-        # mean predicted probabilities
-        ax1 = fig.add_subplot(gs[0, 1])
-        mean_prob_ct = self.predictions[self.predictions.index.isin(list_cells)].mean(axis=0)
-        plot_pie_chart(ax1, mean_prob_ct, color_dict=pie_color_dict)
-        ax1.set_title("Mean Predicted Probabilities")
-
-        # predicted cell type proportions
-        ax2 = fig.add_subplot(gs[0, 2])
-        prop_ct = self.predictions[self.predictions.index.isin(list_cells)].idxmax(axis=1).value_counts() / len(
-            list_cells
-        )
-        plot_pie_chart(ax2, prop_ct, color_dict=pie_color_dict)
-        ax2.set_title("Predicted Cell Type Proportions")
-
-        # true cell type proportions
-        ax3 = fig.add_subplot(gs[1, 1])
-        true_prop = self.proportions.loc[spot_id]
-        plot_pie_chart(ax3, true_prop, color_dict=pie_color_dict)
-        ax3.set_title("True Cell Type Proportions")
-
-        # legend
-        ax4 = fig.add_subplot(gs[1, 2])
-        ax4.axis("off")
-        plot_legend(pie_color_dict, ax4)
-        ax4.set_title("Legend")
-
-        plt.tight_layout()
-        plt.show()
-
-    @require_attributes("proportions", "spot_dict")
-    def plot_colocalization_matrix(
-        self, title: str = "", display: bool = True, figsize: tuple = (8, 6), cmap: str = "coolwarm"
-    ) -> Optional[plt.Figure]:
-        """
-        Plots the Pearson correlation matrix of cell type proportions across spots.
-
-        This visualizes cell type colocalization: how often cell types co-occur
-        across spots based on proportion similarity.
-
-        Args:
-            title: Title of the plot.
-            display: Whether to display the plot immediately.
-            figsize: Size of the figure.
-            cmap: Colormap for heatmap.
+        One row per cell: predicted cell type, its probability, and whatever else is known.
 
         Returns:
-            The matplotlib figure (if display is False).
+            A frame indexed by cell id, with the centroid when a segmentation is attached,
+            the entropy of the prediction, the seed agreement for an aggregate, and the true
+            cell type when there is one.
         """
 
-        correlation_matrix = self.proportions.corr(method="pearson")
-
-        fig, ax = plt.subplots(figsize=figsize)
-        sns.heatmap(
-            correlation_matrix,
-            annot=False,
-            fmt=".2f",
-            cmap=cmap,
-            square=True,
-            xticklabels=True,
-            yticklabels=True,
-            cbar_kws={"label": "Pearson Correlation"},
-            ax=ax,
-            vmin=-1,
-            vmax=1,
+        table = pd.DataFrame(
+            {
+                "cell_type": self.labels,
+                "confidence": self.confidence,
+                "entropy": prediction_entropy(self.predictions),
+            }
         )
-        ax.set_title(title, fontsize=14)
-        plt.tight_layout()
 
-        if display:
-            plt.show()
-            return None
-        else:
-            plt.close(fig)
-            return fig
+        if self.run.agreement is not None:
+            table["seed_agreement"] = self.run.agreement.reindex(table.index)
+        if self.seg_dict is not None:
+            table = table.join(self.centroids)
+        if self.true_labels is not None:
+            table["true_cell_type"] = self.true_labels.reindex(table.index)
+            table["correct"] = table["true_cell_type"] == table["cell_type"]
 
-    @require_attributes("proportions", "spot_dict")
-    def evaluate_prop_predictions(self, subset="all") -> Dict[str, float]:
+        return table
+
+    def spot_membership(self) -> pd.Series:
         """
-        Evaluates slide-level predictions using various metrics. With this function, you can compute a series of
-        metrics to compare, for each cell-type, true vs predicted proportions over the histological slide.
-
-        Args:
-            subset: Subset of spots to evaluate ("train", "no_train", or "all").
+        Whether each predicted cell falls inside a spot.
 
         Returns:
-            Dict[str, float]: A dictionary of computed metrics.
+            A boolean series indexed by cell id.
         """
 
+        inside = cells_in_spots(self.spot_dict)
+
+        return pd.Series(self.predictions.index.isin(inside), index=self.predictions.index, name="in_spot")
+
+    # ------------------------------------------------------------------ summaries
+
+    def describe(self) -> pd.DataFrame:
+        """
+        A compact recap of the run, for the top of a notebook.
+
+        Returns:
+            A one-column frame of run properties.
+        """
+
+        inside = int(self.spot_membership().sum())
+        rows = {
+            "run": self.run.name,
+            "cells": f"{len(self.predictions):,}",
+            "cells in spots": f"{inside:,} ({inside / max(len(self.predictions), 1):.1%})",
+            "cell types": len(self.ct_list),
+            "spots with cells": f"{len(self.spot_dict):,}",
+            "spots in proportions": f"{len(self.proportions):,}",
+            "predictions": "adjusted (PPSA)" if self.run.adjusted else "raw",
+            "seeds": self.run.n_seeds if self.run.is_aggregate else self.run.params.get("rs", "?"),
+        }
+        for key in (
+            "hidden_dims",
+            "norm",
+            "dropout",
+            "lr",
+            "alpha",
+            "beta",
+            "divergence",
+            "epochs",
+            "adjustment",
+            "gated",
+        ):
+            if key in self.run.params:
+                rows[key] = self.run.params[key]
+        if self.mpp is not None:
+            rows["mpp"] = f"{self.mpp:.4f}"
+        if self.run.agreement is not None:
+            rows["mean seed agreement"] = f"{self.run.agreement.mean():.3f}"
+        if self.has_ground_truth:
+            rows["ground truth"] = f"{len(self.true_labels):,} cells"  # type: ignore[arg-type]
+
+        # Everything is rendered as text: the values are of mixed types, and a mixed object
+        # column comes back from a spreadsheet with False turned into 0.
+        return pd.DataFrame.from_dict(
+            {key: str(value) for key, value in rows.items()}, orient="index", columns=["value"]
+        )
+
+    def celltype_summary(self) -> pd.DataFrame:
+        """
+        Per cell type: how many cells were assigned to it, how confident those calls are,
+        and how its predicted abundance compares to the deconvolution.
+
+        Returns:
+            A frame indexed by cell type, in model-class order.
+        """
+
+        counts = self.labels.value_counts()
+        mean_spot_proportion = self.proportions.mean(axis=0)
+        rows = []
+
+        for cell_type in self.ct_list:
+            selection = self.labels == cell_type
+            probabilities = self.confidence[selection]
+            all_probabilities = self.predictions[cell_type]
+            rows.append(
+                {
+                    "cell_type": cell_type,
+                    "n_cells": int(counts.get(cell_type, 0)),
+                    "fraction": float(counts.get(cell_type, 0) / max(len(self.labels), 1)),
+                    "deconv_fraction": float(mean_spot_proportion.get(cell_type, np.nan)),
+                    "min_prob": float(probabilities.min()) if selection.any() else np.nan,
+                    "median_prob": float(probabilities.median()) if selection.any() else np.nan,
+                    "mean_prob": float(probabilities.mean()) if selection.any() else np.nan,
+                    "max_prob": float(probabilities.max()) if selection.any() else np.nan,
+                    "mean_prob_all_cells": float(all_probabilities.mean()),
+                }
+            )
+
+        table = pd.DataFrame(rows).set_index("cell_type")
+        if self.run.agreement is not None:
+            table["mean_agreement"] = [
+                float(self.run.agreement[self.labels == ct].mean()) if (self.labels == ct).any() else np.nan
+                for ct in self.ct_list
+            ]
+
+        return table
+
+    def spot_metrics(self, subset: str = "all") -> pd.DataFrame:
+        """
+        How well the per-spot means of the predictions reproduce the deconvolution.
+
+        This is the headline evaluation when there is no ground truth. Note that the spots
+        used for training are fitted by construction, so ``subset="held_out"`` is the honest
+        number.
+
+        Args:
+            subset: ``"all"``, ``"train"`` or ``"held_out"``.
+
+        Returns:
+            A frame indexed by cell type with Pearson r, Spearman rho, MSE and MAE, plus a
+            ``__global__`` row holding the means.
+        """
+
+        predicted = self.predicted_proportions
         if subset == "train":
-            predicted_proportions = self.predicted_proportions.loc[self.train_spots]
-        elif subset == "no_train":
-            predicted_proportions = self.predicted_proportions.loc[self.no_train_spots]
-        elif subset == "all":
-            predicted_proportions = self.predicted_proportions.copy()
-        else:
-            raise ValueError("Invalid subset. Choose 'train', 'no_train', or 'all'.")
+            predicted = predicted.reindex(self.train_spots).dropna(how="all")
+        elif subset == "held_out":
+            predicted = predicted.reindex(self.held_out_spots).dropna(how="all")
+        elif subset != "all":
+            raise ValueError(f"subset must be 'all', 'train' or 'held_out', got '{subset}'.")
 
-        true_proportions, predicted_proportions = self.proportions.align(predicted_proportions, join="inner", axis=0)
+        truth, predicted = self.proportions.align(predicted, join="inner", axis=0)
+        truth, predicted = truth.align(predicted, join="inner", axis=1)
 
-        if predicted_proportions.isna().any().any():
-            predicted_proportions = predicted_proportions.dropna()
-            true_proportions = true_proportions.loc[predicted_proportions.index]
+        if truth.empty:
+            raise ValueError(f"No spot left for subset='{subset}'.")
 
-        metrics = {}
+        rows = []
+        for cell_type in truth.columns:
+            x = truth[cell_type].to_numpy()
+            y = predicted[cell_type].to_numpy()
+            constant = x.std() == 0 or y.std() == 0
+            rows.append(
+                {
+                    "cell_type": cell_type,
+                    "pearson": np.nan if constant else float(pearsonr(x, y)[0]),
+                    "spearman": np.nan if constant else float(spearmanr(x, y)[0]),
+                    "mse": float(np.mean((x - y) ** 2)),
+                    "mae": float(np.mean(np.abs(x - y))),
+                }
+            )
 
-        # Compute per-cell-type metrics
-        pearson_list = []
-        spearman_list = []
-        mse_list = []
-        mae_list = []
+        table = pd.DataFrame(rows).set_index("cell_type")
+        table.loc["__global__"] = table.mean(numeric_only=True)
+        table.attrs["n_spots"] = len(truth)
+        table.attrs["subset"] = subset
 
-        for cell_type in true_proportions.columns:
-            true_col = true_proportions[cell_type].values
-            pred_col = predicted_proportions[cell_type].values
+        return table
 
-            if np.std(true_col) > 0 and np.std(pred_col) > 0:  # Ensure non-constant values
-                pearson_corr = pearsonr(true_col, pred_col)[0]
-                spearman_corr = spearmanr(true_col, pred_col)[0]
-            else:
-                pearson_corr = np.nan
-                spearman_corr = np.nan
-
-            mse_value = mean_squared_error(true_col, pred_col)
-            mae_value = mean_absolute_error(true_col, pred_col)
-
-            metrics[f"Pearson Correlation {cell_type}"] = pearson_corr
-            metrics[f"Spearman Correlation {cell_type}"] = spearman_corr
-            metrics[f"MSE {cell_type}"] = mse_value
-            metrics[f"MAE {cell_type}"] = mae_value
-
-            pearson_list.append(pearson_corr)
-            spearman_list.append(spearman_corr)
-            mse_list.append(mse_value)
-            mae_list.append(mae_value)
-
-        # Compute global metrics (Averaged approach)
-        metrics["Pearson Correlation global"] = np.nanmean(pearson_list)
-        metrics["Spearman Correlation global"] = np.nanmean(spearman_list)
-        metrics["MSE global"] = np.mean(mse_list)
-        metrics["MAE global"] = np.mean(mae_list)
-
-        return metrics
-
-    def plot_predicted_probability_histograms(
-        self,
-        bins: int = 60,
-        y_lim: Optional[tuple] = None,
-        figsize: tuple = (16, 10),
-        compare_to_gt: bool = False,
-        savefig: Optional[str] = None,
-    ):
+    def cell_metrics(self, subset: str = "all", per_class: bool = True) -> Dict[str, Any]:
         """
-        Plots histograms of predicted probabilities for each cell type.
-
-        If compare_to_gt is True, plots histograms separately for cells that are truly
-        that type (based on ground truth) vs. those that are not.
+        Cell-level accuracy against a ground truth.
 
         Args:
-            bins: Number of bins for histogram.
-            y_lim: Y-axis limit.
-            figsize: Size of the figure.
-            compare_to_gt: Whether to split by true/false labels.
-            savefig: Path to save the figure.
-        """
-
-        sns.set(style="whitegrid")
-
-        cell_types = self.predictions.columns.tolist()
-        n_types = len(cell_types)
-        n_cols = 3
-        n_rows = (n_types + n_cols - 1) // n_cols
-        fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize)
-        axes = axes.flatten()
-
-        if compare_to_gt:
-            if self.ground_truth is None:
-                raise ValueError("Ground truth must be provided to compare predicted probabilities.")
-
-            gt_df = self.ground_truth.copy()
-
-            for i, cell_type in enumerate(cell_types):
-                ax = axes[i]
-
-                probs = self.predictions[cell_type]
-                truth = gt_df[cell_type] >= 0.5
-
-                plot_df = pd.DataFrame(
-                    {
-                        "Predicted Probability": probs,
-                        "True Label": truth.map({True: f"{cell_type}", False: f"Not {cell_type}"}),
-                    }
-                )
-
-                sns.histplot(
-                    data=plot_df,
-                    x="Predicted Probability",
-                    hue="True Label",
-                    bins=bins,
-                    ax=ax,
-                    palette="Set1",
-                    element="step",
-                    stat="count",
-                    common_norm=False,
-                )
-
-                ax.set_title(f"{cell_type}", fontsize=12)
-                ax.set_xlim(0, 1)
-                if y_lim is not None:
-                    ax.set_ylim(y_lim)
-
-        else:
-            for i, cell_type in enumerate(cell_types):
-                ax = axes[i]
-                sns.histplot(self.predictions[cell_type], bins=bins, kde=False, ax=ax, color="skyblue")
-                ax.set_title(f"{cell_type}", fontsize=12)
-                ax.set_xlabel("Predicted Probability")
-                ax.set_ylabel("Count")
-                ax.set_xlim(0, 1)
-                if y_lim is not None:
-                    ax.set_ylim(y_lim)
-
-        for j in range(n_types, len(axes)):
-            fig.delaxes(axes[j])
-
-        fig.tight_layout()
-
-        if savefig is not None:
-            fig.savefig(savefig, dpi=300, bbox_inches="tight")
-
-        plt.show()
-
-    def evaluate_cell_predictions(self, subset="all", per_class=True) -> Dict[str, float]:
-        """
-        Evaluates cell-level predictions using various metrics.
-
-        Args:
-            subset: Subset of cells to evaluate ("train", "no_train", or "all").
-            per_class: Whether to compute metrics per class.
+            subset: ``"all"``, ``"train"`` or ``"held_out"``.
+            per_class: Whether to add the per-cell-type scores.
 
         Returns:
-            A dictionary of computed metrics.
+            A dictionary of metrics; the per-class entries are pandas objects.
+
+        Raises:
+            ValueError: If no ground truth is attached.
         """
 
         if self.true_labels is None:
-            raise ValueError("True labels are not available. Please provide ground_truth.")
+            raise ValueError(
+                "Cell-level metrics need a per-cell ground truth, which most datasets do not have. "
+                "Attach one with set_ground_truth(), or use spot_metrics() instead."
+            )
 
-        if subset == "train":
-            true_labels = {k: v for k, v in self.true_labels.items() if k in self.train_cells}
-            predicted_labels = {k: v for k, v in self.predicted_labels.items() if k in self.train_cells}
-        elif subset == "no_train":
-            true_labels = {k: v for k, v in self.true_labels.items() if k in self.no_train_cells}
-            predicted_labels = {k: v for k, v in self.predicted_labels.items() if k in self.no_train_cells}
-        elif subset == "all":
-            true_labels = self.true_labels.copy()
-            predicted_labels = self.predicted_labels.copy()
-        else:
-            raise ValueError("Invalid subset. Choose 'train', 'no_train', or 'all'.")
+        from sklearn.metrics import accuracy_score
+        from sklearn.metrics import balanced_accuracy_score
+        from sklearn.metrics import confusion_matrix
+        from sklearn.metrics import f1_score
+        from sklearn.metrics import precision_score
+        from sklearn.metrics import recall_score
 
-        true_labels = pd.Series({k: v["cell_type"] for k, v in true_labels.items()})
-        predicted_labels = pd.Series({k: v["cell_type"] for k, v in predicted_labels.items()})
+        cells = self._subset_cells(subset)
+        shared = [cell for cell in cells if cell in self.true_labels.index]
+        if not shared:
+            raise ValueError(f"No cell of subset='{subset}' has a ground-truth label.")
 
-        # Global accuracy
-        global_accuracy = accuracy_score(true_labels, predicted_labels)
+        truth = self.true_labels.loc[shared]
+        predicted = self.labels.loc[shared]
 
-        # Balanced accuracy
-        balanced_acc = balanced_accuracy_score(true_labels, predicted_labels)
-
-        # Weighted metrics
-        weighted_f1 = f1_score(true_labels, predicted_labels, average="weighted", zero_division=0)
-        weighted_precision = precision_score(true_labels, predicted_labels, average="weighted", zero_division=0)
-        weighted_recall = recall_score(true_labels, predicted_labels, average="weighted", zero_division=0)
-
-        metrics = {
-            "Global Accuracy": global_accuracy,
-            "Balanced Accuracy": balanced_acc,
-            "Weighted F1 Score": weighted_f1,
-            "Weighted Precision": weighted_precision,
-            "Weighted Recall": weighted_recall,
+        metrics: Dict[str, Any] = {
+            "n_cells": len(shared),
+            "accuracy": float(accuracy_score(truth, predicted)),
+            "balanced_accuracy": float(balanced_accuracy_score(truth, predicted)),
+            "weighted_f1": float(f1_score(truth, predicted, average="weighted", zero_division=0)),
+            "weighted_precision": float(precision_score(truth, predicted, average="weighted", zero_division=0)),
+            "weighted_recall": float(recall_score(truth, predicted, average="weighted", zero_division=0)),
         }
 
         if per_class:
-            unique_classes = np.unique(true_labels)
-            f1_per_class = f1_score(true_labels, predicted_labels, average=None, zero_division=0)
-            precision_per_class = precision_score(true_labels, predicted_labels, average=None, zero_division=0)
-            recall_per_class = recall_score(true_labels, predicted_labels, average=None, zero_division=0)
-            cm = confusion_matrix(true_labels, predicted_labels)
-
-            metrics.update(
+            classes = sorted(set(truth.unique()) | set(predicted.unique()))
+            metrics["per_class"] = pd.DataFrame(
                 {
-                    "F1 Score (Per Class)": dict(zip(unique_classes, f1_per_class)),
-                    "Precision (Per Class)": dict(zip(unique_classes, precision_per_class)),
-                    "Recall (Per Class)": dict(zip(unique_classes, recall_per_class)),
-                    "Confusion Matrix": pd.DataFrame(cm, columns=list(unique_classes), index=list(unique_classes)),
-                }
+                    "f1": f1_score(truth, predicted, average=None, labels=classes, zero_division=0),
+                    "precision": precision_score(truth, predicted, average=None, labels=classes, zero_division=0),
+                    "recall": recall_score(truth, predicted, average=None, labels=classes, zero_division=0),
+                    "support": [int((truth == cls).sum()) for cls in classes],
+                },
+                index=pd.Index(classes, name="cell_type"),
+            )
+            metrics["confusion_matrix"] = pd.DataFrame(
+                confusion_matrix(truth, predicted, labels=classes), index=classes, columns=classes
             )
 
         return metrics
 
-    @require_attributes("image_dict")
-    def plot_grid_celltype(
+    def _subset_cells(self, subset: str) -> List[str]:
+        """
+        Resolves a cell subset name.
+
+        Args:
+            subset: ``"all"``, ``"train"`` or ``"held_out"``.
+
+        Returns:
+            The cell ids.
+        """
+
+        if subset == "all":
+            return list(self.predictions.index)
+        if subset == "train":
+            return [cell for cell in self.train_cells if cell in self.predictions.index]
+        if subset == "held_out":
+            return [cell for cell in self.held_out_cells if cell in self.predictions.index]
+
+        raise ValueError(f"subset must be 'all', 'train' or 'held_out', got '{subset}'.")
+
+    # ------------------------------------------------------------------ plots
+
+    def plot_history(self, savefig: Optional[str] = None) -> Figure:
+        """
+        The training and validation loss of the run.
+
+        Args:
+            savefig: Path to write the figure to.
+
+        Returns:
+            The figure.
+        """
+
+        if self.run.history is None:
+            raise ValueError("This run carries no loss history (an aggregate of seeds never does).")
+
+        return plots.plot_history(self.run.history["train"], self.run.history["val"], savefig=savefig)
+
+    def plot_abundance(self, savefig: Optional[str] = None, **kwargs: Any) -> Figure:
+        """
+        Predicted composition of the slide against the mean deconvolution proportions.
+
+        Args:
+            savefig: Path to write the figure to.
+            **kwargs: Passed to :func:`hedest.analysis.plots.plot_abundance`.
+
+        Returns:
+            The figure.
+        """
+
+        counts = self.labels.value_counts(normalize=True).reindex(self.ct_list).fillna(0.0)
+        reference = self.proportions.mean(axis=0).reindex(self.ct_list)
+
+        return plots.plot_abundance(counts, reference=reference, palette=self.palette, savefig=savefig, **kwargs)
+
+    def plot_proportion_scatter(self, subset: str = "all", savefig: Optional[str] = None, **kwargs: Any) -> Figure:
+        """
+        Predicted against deconvoluted proportion, one panel per cell type.
+
+        Args:
+            subset: ``"all"``, ``"train"`` or ``"held_out"``.
+            savefig: Path to write the figure to.
+            **kwargs: Passed to :func:`hedest.analysis.plots.plot_proportion_scatter`.
+
+        Returns:
+            The figure.
+        """
+
+        predicted = self.predicted_proportions
+        if subset == "train":
+            predicted = predicted.reindex(self.train_spots).dropna(how="all")
+        elif subset == "held_out":
+            predicted = predicted.reindex(self.held_out_spots).dropna(how="all")
+
+        return plots.plot_proportion_scatter(
+            self.proportions, predicted, palette=self.palette, savefig=savefig, **kwargs
+        )
+
+    def plot_probability_histograms(
+        self, compare_to_truth: bool = False, savefig: Optional[str] = None, **kwargs: Any
+    ) -> Figure:
+        """
+        Distribution of the predicted probabilities, per cell type.
+
+        Args:
+            compare_to_truth: Whether to split each histogram by the ground truth.
+            savefig: Path to write the figure to.
+            **kwargs: Passed to :func:`hedest.analysis.plots.plot_probability_histograms`.
+
+        Returns:
+            The figure.
+        """
+
+        truth = None
+        if compare_to_truth:
+            if self.true_labels is None:
+                raise ValueError("compare_to_truth needs a ground truth; call set_ground_truth() first.")
+            truth = self.true_labels
+
+        return plots.plot_probability_histograms(
+            self.predictions, truth=truth, palette=self.palette, savefig=savefig, **kwargs
+        )
+
+    def plot_confidence(
+        self, bins: int = 60, figsize: Tuple[float, float] = (11.0, 4.0), savefig: Optional[str] = None
+    ) -> Figure:
+        """
+        How decided the predictions are: the probability of the winning class, the entropy
+        of the whole vector, and the seed agreement when the run is an aggregate.
+
+        Args:
+            bins: Number of histogram bins.
+            figsize: Figure size.
+            savefig: Path to write the figure to.
+
+        Returns:
+            The figure.
+        """
+
+        panels = 3 if self.run.agreement is not None else 2
+        fig, axes = plt.subplots(1, panels, figsize=(figsize[0] * panels / 3, figsize[1]))
+
+        axes[0].hist(self.confidence.to_numpy(), bins=bins, color="#4c72b0")
+        axes[0].set_xlabel("probability of the predicted type")
+        axes[0].set_ylabel("cells")
+        axes[0].set_title(f"median {self.confidence.median():.2f}", fontsize=10)
+
+        entropy = prediction_entropy(self.predictions)
+        axes[1].hist(entropy.to_numpy(), bins=bins, color="#55a868")
+        axes[1].set_xlabel("normalised entropy")
+        axes[1].set_title(f"median {entropy.median():.2f}", fontsize=10)
+
+        if self.run.agreement is not None:
+            agreement = self.run.agreement
+            levels = sorted(agreement.unique())
+            axes[2].bar(
+                [f"{level:.2f}" for level in levels], [float((agreement == x).mean()) for x in levels], color="#c44e52"
+            )
+            axes[2].set_xlabel(f"share of the {self.run.n_seeds} seeds agreeing")
+            axes[2].set_title(f"unanimous on {float((agreement == 1.0).mean()):.1%} of cells", fontsize=10)
+
+        return plots.close(fig, savefig)
+
+    def plot_adjustment_effect(
+        self, figsize: Tuple[float, float] = (11.0, 4.5), savefig: Optional[str] = None
+    ) -> Figure:
+        """
+        What Prior Probability Shift Adjustment changed: the composition before and after,
+        and how many cells switched cell type.
+
+        Args:
+            figsize: Figure size.
+            savefig: Path to write the figure to.
+
+        Returns:
+            The figure.
+        """
+
+        if self.run.predictions_adjusted is None:
+            raise ValueError("This run holds no adjusted predictions, so there is nothing to compare.")
+
+        raw_labels = self.run.predictions_raw.idxmax(axis=1)
+        adjusted_labels = self.run.predictions_adjusted.idxmax(axis=1)
+        shared = raw_labels.index.intersection(adjusted_labels.index)
+        raw_labels, adjusted_labels = raw_labels.loc[shared], adjusted_labels.loc[shared]
+
+        raw_fraction = raw_labels.value_counts(normalize=True).reindex(self.ct_list).fillna(0.0)
+        adjusted_fraction = adjusted_labels.value_counts(normalize=True).reindex(self.ct_list).fillna(0.0)
+        changed = float((raw_labels != adjusted_labels).mean())
+
+        fig, axes = plt.subplots(1, 2, figsize=figsize)
+        positions = np.arange(len(self.ct_list))
+        width = 0.4
+        axes[0].bar(positions - width / 2, raw_fraction.to_numpy(), width, label="raw", color="#8c8c8c")
+        axes[0].bar(
+            positions + width / 2,
+            adjusted_fraction.to_numpy(),
+            width,
+            label="adjusted",
+            color=self.palette.color_list(self.ct_list),
+        )
+        axes[0].set_xticks(positions)
+        axes[0].set_xticklabels(self.ct_list, rotation=40, ha="right", fontsize=8)
+        axes[0].set_ylabel("fraction of cells")
+        axes[0].legend(frameon=False, fontsize=9)
+        axes[0].set_title(f"{changed:.1%} of cells change type", fontsize=10)
+
+        flow = (
+            pd.crosstab(raw_labels, adjusted_labels, normalize="index")
+            .reindex(index=self.ct_list, columns=self.ct_list)
+            .fillna(0.0)
+        )
+        image = axes[1].imshow(flow.to_numpy(), cmap="magma_r", vmin=0, vmax=1)
+        axes[1].set_xticks(positions)
+        axes[1].set_xticklabels(self.ct_list, rotation=40, ha="right", fontsize=7)
+        axes[1].set_yticks(positions)
+        axes[1].set_yticklabels(self.ct_list, fontsize=7)
+        axes[1].set_xlabel("adjusted")
+        axes[1].set_ylabel("raw")
+        fig.colorbar(image, ax=axes[1], fraction=0.046, label="share of the raw class")
+
+        return plots.close(fig, savefig)
+
+    def plot_cell_mosaic(
+        self,
+        spot_id: Optional[str] = None,
+        cell_ids: Optional[Sequence[str]] = None,
+        num_cols: int = 8,
+        show_probs: bool = True,
+        savefig: Optional[str] = None,
+    ) -> Figure:
+        """
+        The crops of the cells of one spot, titled with their predicted cell type.
+
+        Args:
+            spot_id: The spot to show. A random one is picked when neither this nor
+                ``cell_ids`` is given.
+            cell_ids: Explicit list of cells to show, instead of a spot.
+            num_cols: Number of columns.
+            show_probs: Whether to print the probability under each label.
+            savefig: Path to write the figure to.
+
+        Returns:
+            The figure.
+        """
+
+        self._require(image_dict=self.image_dict)
+
+        if cell_ids is None:
+            if spot_id is None:
+                spot_id = str(np.random.choice(list(self.spot_dict)))
+                logger.info(f"Randomly selected spot {spot_id}.")
+            if spot_id not in self.spot_dict:
+                raise ValueError(f"Spot {spot_id} holds no cell.")
+            cell_ids = self.spot_dict[spot_id]
+
+        known = [cell for cell in cell_ids if cell in self.labels.index]
+
+        return plots.plot_cell_mosaic(
+            self.image_dict,  # type: ignore[arg-type]
+            known,
+            labels=self.labels.loc[known].to_dict(),
+            true_labels=None if self.true_labels is None else self.true_labels.reindex(known).dropna().to_dict(),
+            probs=self.confidence.loc[known].to_dict() if show_probs else None,
+            num_cols=num_cols,
+            suptitle=None if spot_id is None else f"spot {spot_id} — {len(known)} cells",
+            savefig=savefig,
+        )
+
+    def plot_celltype_grid(
         self,
         cell_type: Optional[str] = None,
-        n: int = 20,
+        num_rows: int = 8,
+        num_cols: int = 8,
         selection: str = "max",
-        show_probs: bool = True,
-        display: bool = False,
-        nrows: Optional[int] = None,
-        ncols: Optional[int] = None,
-        fontsize: int = 20,
-    ) -> Optional[plt.Figure]:
-        """
-        Plots a grid of cell images predicted as one or multiple cell types.
-
-        Args:
-            cell_type: Target cell type. If None, plot all cell types in a big grid.
-            n: Number of images per cell type grid.
-            selection: Selection mode ("max" or "random").
-            show_probs: Whether to show probability labels.
-            display: Whether to display the plot.
-            nrows: Number of rows for the big grid (only used if cell_type is None).
-            ncols: Number of cols for the big grid (only used if cell_type is None).
-            fontsize: Font size for cell type titles (only used if cell_type is None).
-
-        Returns:
-            The generated matplotlib figure.
-        """
-
-        if cell_type is not None:
-            # --- Single cell type: just call your original function ---
-            return plot_grid_celltype(
-                self.predictions,
-                self.image_dict,
-                cell_type,
-                n=n,
-                selection=selection,
-                title=cell_type,
-                show_probs=show_probs,
-                display=display,
-            )
-
-        # --- All cell types in one big plot ---
-        ct_list = [ct for ct in self.ct_list if (self.predictions.idxmax(axis=1) == ct).any()]
-        n_ct = len(ct_list)
-
-        if nrows is None or ncols is None:
-            # auto square layout if not provided
-            nrows = int(np.ceil(np.sqrt(n_ct)))
-            ncols = int(np.ceil(n_ct / nrows))
-
-        fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 6, nrows * 6))
-        axes = np.atleast_2d(axes)
-
-        for idx, ct in enumerate(ct_list):
-            row, col = divmod(idx, ncols)
-            ax = axes[row, col]
-
-            # generate the mini-figure using your original function
-            subfig = plot_grid_celltype(
-                self.predictions,
-                self.image_dict,
-                ct,
-                n=n,
-                selection=selection,
-                show_probs=show_probs,
-                display=False,
-            )
-
-            # draw the mini-figure into the main subplot
-            subfig.canvas.draw()
-            img = np.frombuffer(subfig.canvas.tostring_rgb(), dtype=np.uint8)
-            img = img.reshape(subfig.canvas.get_width_height()[::-1] + (3,))
-            ax.imshow(img)
-            ax.set_title(ct, fontsize=fontsize)
-            ax.axis("off")
-
-            plt.close(subfig)
-
-        # turn off any extra empty slots
-        for i in range(n_ct, nrows * ncols):
-            row, col = divmod(i, ncols)
-            axes[row, col].axis("off")
-
-        plt.tight_layout()
-
-        if display:
-            plt.show()
-            return None
-        else:
-            plt.close(fig)
-            return fig
-
-    @require_attributes("adata", "adata_name")
-    def compare_area(
-        self,
-        cell_types: List[str],
-        mpp: Optional[float] = None,
-        title: str = "",
-        ct_utest: List[List[str]] = None,
-        height_unit_factor: float = 0.08,
-        y_offset_factor: float = 1.15,
-        fontsize_utest: float = 12,
+        cell_size: float = 0.32,
+        mosaic: Optional[Tuple[int, int]] = None,
         savefig: Optional[str] = None,
-    ) -> None:
+    ) -> Figure:
         """
-        Compares the area of predicted cells for specific cell types using box plots and optional statistical tests.
+        A mosaic of galleries, one per predicted cell type.
+
+        Each cell type gets a ``num_rows x num_cols`` block of crops that touch, so the
+        morphologies can be compared at a glance, and the blocks are laid out on a grid
+        whose shape is chosen from their number to keep the figure roughly landscape.
 
         Args:
-            cell_types (List[str]): List of cell types to compare. Must be in self.ct_list.
-            mpp (float, optional): Microns per pixel for area conversion.
-            title (str, optional): Plot title.
-            ct_utest (List[List[str]], optional): List of [cell_type_A, cell_type_B] pairs for statistical comparison.
-                                                    Performs one-sided Mann–Whitney U test (A > B).
-            height_unit_factor (float): Factor to adjust vertical spacing of statistical annotations.
-            y_offset_factor (float): Vertical offset factor for statistical annotation brackets.
-            fontsize_utest (float): Font size for statistical annotation text.
-            savefig (str, optional): If provided, saves the plot to this path.
-        """
-
-        if mpp is None:
-            mpp = 55 / self.adata.uns["spatial"][self.adata_name]["scalefactors"]["spot_diameter_fullres"]
-
-        # --- Validation ---
-        invalid_ct = [ct for ct in cell_types if ct not in self.ct_list]
-        if invalid_ct:
-            raise ValueError(f"Invalid cell types: {invalid_ct}. Available types: {self.ct_list}")
-
-        if self.seg_dict_w_class is None:
-            raise ValueError(
-                "No segmentation with predicted classes found. Please run `_generate_dicts_viz_pred` first."
-            )
-
-        # --- Area collection ---
-        areas_by_type = {ct: [] for ct in cell_types}
-
-        for cell_id, info in self.seg_dict_w_class["nuc"].items():
-            cell_label = self.predicted_labels.get(cell_id, {}).get("cell_type", None)
-            if cell_label in cell_types:
-                contour = info.get("contour")
-                if contour and len(contour) >= 3:
-                    area = polygon_area(contour) * (mpp**2)
-                    areas_by_type[cell_label].append(area)
-
-        data = [{"Cell Type": ct, "Area": area} for ct, areas in areas_by_type.items() for area in areas]
-        df = pd.DataFrame(data)
-
-        # --- Color map ---
-        color_map = {}
-        for k, (name, rgba) in self.color_dict.items():
-            rgb = tuple(c / 255 for c in rgba[:3])
-            color_map[name] = rgb
-        palette = {ct: color_map.get(ct, (0.5, 0.5, 0.5)) for ct in cell_types}
-
-        # --- Plotting ---
-        plt.figure(figsize=(10, 6))
-        ax = sns.boxplot(data=df, x="Cell Type", y="Area", hue="Cell Type", palette=palette, dodge=False, legend=False)
-
-        plt.title(title)
-        plt.xlabel("")
-        plt.ylabel("Nucleus area (µm²)")
-        plt.yscale("log")
-        plt.xticks(rotation=45)
-        plt.tight_layout()
-
-        # --- Optional statistical comparison ---
-        if ct_utest is not None:
-
-            def p_to_star(p):
-                if p <= 0.001:
-                    return "***"
-                elif p <= 0.01:
-                    return "**"
-                elif p <= 0.05:
-                    return "*"
-                else:
-                    return "ns"
-
-            # Store current max height for stacking brackets
-            y_max = df["Area"].max()
-            y_min = df["Area"].min()
-            height_unit = (np.log10(y_max) - np.log10(y_min)) * height_unit_factor
-
-            # For each pair, perform test and annotate
-            for i, (ct_a, ct_b) in enumerate(ct_utest):
-                if ct_a not in areas_by_type or ct_b not in areas_by_type:
-                    print(f"Skipping invalid comparison: {ct_a} vs {ct_b}")
-                    continue
-
-                areas_a = np.array(areas_by_type[ct_a])
-                areas_b = np.array(areas_by_type[ct_b])
-                if len(areas_a) == 0 or len(areas_b) == 0:
-                    print(f"Skipping empty comparison: {ct_a} vs {ct_b}")
-                    continue
-
-                # Mann–Whitney U test (one-sided: A > B)
-                statistic, p_value = mannwhitneyu(areas_a, areas_b, alternative="greater")
-                stars = p_to_star(p_value)
-
-                # --- Plot annotation ---
-                x1, x2 = cell_types.index(ct_a), cell_types.index(ct_b)
-                y, _ = np.log10(y_max) + (i * height_unit), height_unit * 0.4
-                y = 10**y  # back-transform to log scale space
-
-                # Bracket
-                ax.plot([x1, x1, x2, x2], [y, y * y_offset_factor, y * y_offset_factor, y], lw=1.2, c="black")
-
-                # Annotation text
-                ax.text(
-                    (x1 + x2) / 2,
-                    y * (y_offset_factor**1.3),
-                    f"{ct_a} > {ct_b}\np={p_value:.2e} ({stars})",
-                    ha="center",
-                    va="bottom",
-                    fontsize=fontsize_utest,
-                    color="black",
-                )
-
-                # Print results in console too
-                print(f"{ct_a} > {ct_b}: U={statistic:.3f}, p={p_value:.4e} ({stars})")
-
-        plt.tight_layout()
-        if savefig:
-            plt.savefig(savefig, format=savefig.split(".")[-1], dpi=600, bbox_inches="tight")
-            plt.close()
-        else:
-            plt.show()
-
-    def compute_neighborhood_composition(
-        self, compute_dist: str = "centroid", max_distance: Optional[float] = None
-    ) -> Dict[str, Dict[str, float]]:
-        """
-        Computes average neighbor composition per cell type.
-
-        Args:
-            compute_dist: The method to compute distances ("centroid" or "contour").
-            max_distance: The maximum distance to consider for neighbors.
+            cell_type: The cell type to show. All of them, as a mosaic, when None.
+            num_rows: Number of rows of crops per cell type.
+            num_cols: Number of columns of crops per cell type.
+            selection: ``"max"`` for the most confident cells, ``"random"`` for a sample.
+            cell_size: Side of one crop, in inches.
+            mosaic: ``(rows, columns)`` of cell types. Chosen internally when None.
+            savefig: Path to write the figure to.
 
         Returns:
-            Dictionnary cell_type -> neighbor_type -> average count
+            The figure.
         """
 
-        self.delaunay_neighbors = self._build_delaunay_graph(compute_dist=compute_dist, max_distance=max_distance)
+        self._require(image_dict=self.image_dict)
+        cell_types = self.ct_list if cell_type is None else [cell_type]
+        n = max(1, num_rows) * max(1, num_cols)
 
-        neighbor_counts = defaultdict(lambda: defaultdict(int))
-        source_type_counts = defaultdict(int)
-
-        for cell_id, neighbors in self.delaunay_neighbors.items():
-            if cell_id not in self.predicted_labels:
+        blocks: Dict[str, List[str]] = {}
+        for candidate in cell_types:
+            cells = self.labels.index[self.labels == candidate]
+            cells = [cell for cell in cells if cell in self.image_dict]  # type: ignore[operator]
+            if not cells:
                 continue
+            probabilities = self.confidence.loc[cells]
+            if selection == "max":
+                chosen = list(probabilities.nlargest(n).index)
+            elif selection == "random":
+                size = min(n, len(cells))
+                chosen = list(pd.Series(cells).sample(n=size, random_state=0))
+            else:
+                raise ValueError(f"selection must be 'max' or 'random', got '{selection}'.")
+            blocks[candidate] = chosen
 
-            source_type = self.predicted_labels[cell_id]["cell_type"]
-            source_type_counts[source_type] += 1
+        if not blocks:
+            raise ValueError("None of the requested cell types has a cell with a crop.")
 
-            for neighbor_id in neighbors:
-                if neighbor_id not in self.predicted_labels:
-                    continue
-                neighbor_type = self.predicted_labels[neighbor_id]["cell_type"]
-                neighbor_counts[source_type][neighbor_type] += 1
+        counts = self.labels.value_counts()
 
-        aggregated = {
-            src_type: {neigh_type: count / source_type_counts[src_type] for neigh_type, count in neigh_dict.items()}
-            for src_type, neigh_dict in neighbor_counts.items()
-        }
+        return plots.plot_gallery(
+            self.image_dict,  # type: ignore[arg-type]
+            blocks,
+            num_rows=num_rows,
+            num_cols=num_cols,
+            cell_size=cell_size,
+            mosaic=mosaic,
+            palette=self.palette,
+            counts={name: int(counts.get(name, 0)) for name in blocks},
+            savefig=savefig,
+        )
 
-        self.neighborhood_aggregates = aggregated
-        return aggregated
-
-    @require_attributes("adata", "adata_name")
-    def plot_mean_neighbor_distances(
+    def plot_spot_report(
         self,
-        mpp: Optional[float] = None,
-        max_distance: Optional[float] = None,
-        cmap: str = "coolwarm",
-        display: bool = True,
-    ):
+        spot_id: Optional[str] = None,
+        draw_seg: bool = True,
+        figsize: Tuple[float, float] = (15.0, 8.0),
+        savefig: Optional[str] = None,
+    ) -> Figure:
         """
-        Plots a symmetric matrix of mean distances between neighboring cell types.
+        One spot, four ways: the tissue, the mean predicted probabilities, the predicted
+        composition and the deconvolution it is meant to match.
 
         Args:
-            mpp: Microns per pixel for area conversion.
-            max_distance: The maximum distance to consider for neighbors.
-            cmap: The colormap to use for the plot.
-            display: Whether to display the plot or not.
+            spot_id: The spot to show. A random one is picked when None.
+            draw_seg: Whether to draw the nuclei on the tissue panel.
+            figsize: Figure size.
+            savefig: Path to write the figure to.
+
+        Returns:
+            The figure.
         """
 
-        if mpp is None:
-            mpp = 55 / self.adata.uns["spatial"][self.adata_name]["scalefactors"]["spot_diameter_fullres"]
+        self._require(slide_path=self.slide_path, adata=self.adata)
 
-        neighbors = self._build_delaunay_graph(max_distance=max_distance)
-        nuc_dict = self.seg_dict_w_class["nuc"]
+        if spot_id is None:
+            spot_id = str(np.random.choice(list(self.spot_dict)))
+            logger.info(f"Randomly selected spot {spot_id}.")
+        if spot_id not in self.spot_dict:
+            raise ValueError(f"Spot {spot_id} holds no cell.")
 
-        pair_distances = defaultdict(list)
-        coords = {cid: np.array(info["centroid"]) for cid, info in nuc_dict.items()}
-        types = {cid: self.ct_list[info["type"]] for cid, info in nuc_dict.items()}
+        cells = [cell for cell in self.spot_dict[spot_id] if cell in self.predictions.index]
+        predictions = self.predictions.loc[cells]
 
-        for cell_a, neigh_list in neighbors.items():
-            for cell_b in neigh_list:
-                if cell_a >= cell_b:
-                    continue
-                type_a, type_b = types[cell_a], types[cell_b]
-                pair_key = tuple(sorted((type_a, type_b)))
-                dist = np.linalg.norm(coords[cell_a] - coords[cell_b])
-                pair_distances[pair_key].append(dist)
+        viewer = self.visualizer(with_labels=draw_seg)
+        tissue = viewer.plot_spot(spot_id=spot_id, draw_seg=draw_seg, title="", legend=False, figsize=(7, 7))
 
-        matrix = pd.DataFrame(np.nan, index=self.ct_list, columns=self.ct_list, dtype=float)
+        fig = plt.figure(figsize=figsize)
+        grid = gridspec.GridSpec(2, 3, width_ratios=[1.6, 1, 1], figure=fig)
 
-        for (type_a, type_b), dist_list in pair_distances.items():
-            mean_dist = np.mean(dist_list) * mpp
-            matrix.loc[type_a, type_b] = mean_dist
-            matrix.loc[type_b, type_a] = mean_dist
+        ax_image = fig.add_subplot(grid[:, 0])
+        ax_image.imshow(_figure_to_array(tissue))
+        ax_image.axis("off")
+        ax_image.set_title(f"spot {spot_id} — {len(cells)} cells", fontsize=11)
 
-        fig, ax = plt.subplots(figsize=(8, 6))
-        sns.heatmap(
-            matrix,
-            cmap=cmap,
-            annot=False,
-            square=True,
-            linewidths=0.5,
-            fmt=".2f",
-            mask=np.triu(np.ones_like(matrix, dtype=bool), k=1),
-            cbar_kws={"orientation": "horizontal", "shrink": 0.55, "label": "Mean Distance (μm)"},
-            ax=ax,
+        plots.plot_pie_chart(
+            fig.add_subplot(grid[0, 1]), predictions.mean(axis=0), self.palette, title="mean predicted probability"
         )
-        ax.set_xticklabels(self.ct_list, rotation=25, ha="right")
-        ax.set_yticklabels(self.ct_list, rotation=0)
-        plt.grid(False)
-        plt.tight_layout()
+        plots.plot_pie_chart(
+            fig.add_subplot(grid[0, 2]),
+            self.labels.loc[cells].value_counts(normalize=True),
+            self.palette,
+            title="predicted composition",
+        )
+        if spot_id in self.proportions.index:
+            plots.plot_pie_chart(
+                fig.add_subplot(grid[1, 1]), self.proportions.loc[spot_id], self.palette, title="deconvolution"
+            )
+        plots.plot_legend(
+            self.palette,
+            names=[ct for ct in self.ct_list if ct in set(self.labels.loc[cells])],
+            ax=fig.add_subplot(grid[1, 2]),
+            fontsize=9,
+        )
 
-        if display:
-            plt.show()
-            return None
+        return plots.close(fig, savefig)
+
+    def plot_colocalization_matrix(
+        self, source: str = "predicted", method: str = "pearson", savefig: Optional[str] = None, **kwargs: Any
+    ) -> Figure:
+        """
+        Correlation of cell-type proportions across spots: which types share spots.
+
+        Args:
+            source: ``"predicted"`` for the HEDeST proportions, ``"deconvolution"`` for the
+                input ones.
+            method: Correlation method, passed to ``DataFrame.corr``.
+            savefig: Path to write the figure to.
+            **kwargs: Passed to :func:`hedest.analysis.plots.plot_matrix`.
+
+        Returns:
+            The figure.
+        """
+
+        if source == "predicted":
+            frame = self.predicted_proportions
+        elif source == "deconvolution":
+            frame = self.proportions
         else:
-            plt.close(fig)
-            return fig
+            raise ValueError(f"source must be 'predicted' or 'deconvolution', got '{source}'.")
+
+        matrix = frame.reindex(columns=self.ct_list).corr(method=method)
+        kwargs.setdefault("annot", len(matrix) <= 20)
+        kwargs.setdefault("title", f"colocalization across spots ({source})")
+
+        return plots.plot_matrix(matrix, vmin=-1, vmax=1, cbar_label=f"{method} correlation", savefig=savefig, **kwargs)
+
+    def plot_confusion_matrix(
+        self, subset: str = "all", normalize: bool = True, savefig: Optional[str] = None, **kwargs: Any
+    ) -> Figure:
+        """
+        Confusion matrix against the ground truth.
+
+        Args:
+            subset: ``"all"``, ``"train"`` or ``"held_out"``.
+            normalize: Whether to normalise each true-class row to 1.
+            savefig: Path to write the figure to.
+            **kwargs: Passed to :func:`hedest.analysis.plots.plot_matrix`.
+
+        Returns:
+            The figure.
+        """
+
+        metrics = self.cell_metrics(subset=subset, per_class=True)
+        matrix = metrics["confusion_matrix"].astype("float64")
+        if normalize:
+            matrix = matrix.div(matrix.sum(axis=1).replace(0, np.nan), axis=0)
+
+        kwargs.setdefault("cmap", "magma_r")
+        kwargs.setdefault("annot", len(matrix) <= 20)
+        kwargs.setdefault("title", f"balanced accuracy {metrics['balanced_accuracy']:.3f} ({subset})")
+        kwargs.setdefault("xlabel", "predicted")
+        kwargs.setdefault("ylabel", "ground truth")
+
+        return plots.plot_matrix(
+            matrix, vmin=0, vmax=1 if normalize else None, cbar_label="share of true class", savefig=savefig, **kwargs
+        )
+
+    # ------------------------------------------------------------------ neighbourhoods
+
+    def _edges(self, max_distance: Optional[float] = None, compute_dist: str = "centroid") -> np.ndarray:
+        """
+        The Delaunay edges between predicted cells, as indices into :attr:`centroids`.
+
+        Cached, and computed with array operations throughout: on a slide with 10^5 nuclei
+        the triangulation holds of the order of 10^6 edges, which is too many for a Python
+        loop.
+
+        Args:
+            max_distance: Drops edges longer than this, in pixels.
+            compute_dist: ``"centroid"`` to measure between centroids, ``"contour"`` to
+                measure between the closest points of the two contours, which is far slower.
+
+        Returns:
+            An ``(n_edges, 2)`` array of index pairs, each pair sorted.
+        """
+
+        key = (max_distance, compute_dist)
+        if self._edge_cache is not None and self._edges_key == key:
+            return self._edge_cache
+
+        coordinates = self.centroids.to_numpy()
+        simplices = Delaunay(coordinates).simplices
+        pairs = np.concatenate([simplices[:, [0, 1]], simplices[:, [1, 2]], simplices[:, [2, 0]]])
+        pairs = np.sort(pairs, axis=1)
+        edges = np.unique(pairs, axis=0)
+
+        if max_distance is not None:
+            if compute_dist == "centroid":
+                lengths = np.linalg.norm(coordinates[edges[:, 0]] - coordinates[edges[:, 1]], axis=1)
+            elif compute_dist == "contour":
+                nuc = self.seg_dict["nuc"]  # type: ignore[index]
+                cell_ids = list(self.centroids.index)
+                lengths = np.array(
+                    [
+                        np.min(
+                            np.linalg.norm(
+                                np.asarray(nuc[cell_ids[a]]["contour"], dtype="float64")[:, None, :]
+                                - np.asarray(nuc[cell_ids[b]]["contour"], dtype="float64")[None, :, :],
+                                axis=-1,
+                            )
+                        )
+                        for a, b in edges
+                    ]
+                )
+            else:
+                raise ValueError(f"compute_dist must be 'centroid' or 'contour', got '{compute_dist}'.")
+            edges = edges[lengths <= max_distance]
+
+        self._edge_cache = edges
+        self._edges_key = key
+        logger.info(f"Delaunay graph: {len(self.centroids)} cells, {len(edges)} edges.")
+
+        return edges
+
+    def neighbors(self, max_distance: Optional[float] = None, compute_dist: str = "centroid") -> Dict[str, List[str]]:
+        """
+        The Delaunay neighbours of every predicted cell.
+
+        Args:
+            max_distance: Drops edges longer than this, in pixels. Use it: without a cut-off
+                the triangulation joins cells across empty tissue.
+            compute_dist: ``"centroid"`` to measure between centroids, ``"contour"`` to
+                measure the closest points of the two contours, which is much slower.
+
+        Returns:
+            A mapping from cell id to the list of its neighbours.
+        """
+
+        edges = self._edges(max_distance=max_distance, compute_dist=compute_dist)
+        cell_ids = np.asarray(self.centroids.index)
+
+        neighbors: Dict[str, List[str]] = defaultdict(list)
+        for a, b in zip(cell_ids[edges[:, 0]], cell_ids[edges[:, 1]]):
+            neighbors[a].append(b)
+            neighbors[b].append(a)
+
+        return dict(neighbors)
+
+    def _edge_labels(self, max_distance: Optional[float] = None, **kwargs: Any) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        The predicted cell type at each end of every edge.
+
+        Args:
+            max_distance: Passed to :meth:`_edges`.
+            **kwargs: Passed to :meth:`_edges`.
+
+        Returns:
+            Two arrays of cell type names, one per endpoint.
+        """
+
+        edges = self._edges(max_distance=max_distance, **kwargs)
+        labels = self.labels.reindex(self.centroids.index).to_numpy()
+
+        return labels[edges[:, 0]], labels[edges[:, 1]]
+
+    def neighborhood_composition(
+        self, max_distance: Optional[float] = None, normalize: bool = True, **kwargs: Any
+    ) -> pd.DataFrame:
+        """
+        The average neighbourhood of each cell type.
+
+        Args:
+            max_distance: Passed to :meth:`neighbors`.
+            normalize: True for the share of the neighbours of each type, False for the
+                average count.
+            **kwargs: Passed to :meth:`neighbors`.
+
+        Returns:
+            A frame whose rows are the cell type of the cell and whose columns are the cell
+            types of its neighbours.
+        """
+
+        source, target = self._edge_labels(max_distance=max_distance, **kwargs)
+        # Every edge counts in both directions, since it is a neighbour of each endpoint.
+        counts = (
+            pd.crosstab(
+                pd.Series(np.concatenate([source, target]), name="cell"),
+                pd.Series(np.concatenate([target, source]), name="neighbour"),
+            )
+            .reindex(index=self.ct_list, columns=self.ct_list)
+            .fillna(0.0)
+        )
+
+        n_cells = self.labels.value_counts().reindex(self.ct_list).fillna(0)
+        table = counts.div(n_cells.replace(0, np.nan), axis=0)
+        if normalize:
+            table = table.div(table.sum(axis=1).replace(0, np.nan), axis=0)
+
+        return table
+
+    def plot_neighborhood_composition(
+        self, max_distance: Optional[float] = None, savefig: Optional[str] = None, **kwargs: Any
+    ) -> Figure:
+        """
+        The neighbourhood composition as a heatmap.
+
+        Args:
+            max_distance: Passed to :meth:`neighbors`.
+            savefig: Path to write the figure to.
+            **kwargs: Passed to :func:`hedest.analysis.plots.plot_matrix`.
+
+        Returns:
+            The figure.
+        """
+
+        matrix = self.neighborhood_composition(max_distance=max_distance)
+        kwargs.setdefault("cmap", "magma_r")
+        kwargs.setdefault("annot", len(matrix) <= 20)
+        kwargs.setdefault("title", "neighbourhood composition")
+        kwargs.setdefault("xlabel", "cell type of the neighbours")
+        kwargs.setdefault("ylabel", "cell type of the cell")
+
+        return plots.plot_matrix(matrix, vmin=0, cbar_label="share of neighbours", savefig=savefig, **kwargs)
+
+    def neighbor_distances(self, max_distance: Optional[float] = None) -> pd.DataFrame:
+        """
+        Mean distance between neighbouring cells, per pair of cell types.
+
+        Args:
+            max_distance: Passed to :meth:`neighbors`.
+
+        Returns:
+            A symmetric frame, in µm when ``mpp`` is known and in pixels otherwise.
+        """
+
+        edges = self._edges(max_distance=max_distance)
+        coordinates = self.centroids.to_numpy()
+        lengths = np.linalg.norm(coordinates[edges[:, 0]] - coordinates[edges[:, 1]], axis=1)
+        lengths = lengths * (self.mpp if self.mpp is not None else 1.0)
+        source, target = self._edge_labels(max_distance=max_distance)
+
+        frame = pd.DataFrame({"a": source, "b": target, "distance": lengths}).dropna()
+        # Unordered pairs: sort the two ends so (A, B) and (B, A) land in the same group.
+        low = np.minimum(frame["a"], frame["b"])
+        high = np.maximum(frame["a"], frame["b"])
+        means = frame.groupby([low, high])["distance"].mean()
+
+        matrix = pd.DataFrame(np.nan, index=self.ct_list, columns=self.ct_list, dtype="float64")
+        for (type_a, type_b), value in means.items():
+            matrix.loc[type_a, type_b] = value
+            matrix.loc[type_b, type_a] = value
+
+        return matrix
+
+    def plot_neighbor_distances(
+        self, max_distance: Optional[float] = None, savefig: Optional[str] = None, **kwargs: Any
+    ) -> Figure:
+        """
+        Mean neighbour distance per pair of cell types, as a heatmap.
+
+        Args:
+            max_distance: Passed to :meth:`neighbors`.
+            savefig: Path to write the figure to.
+            **kwargs: Passed to :func:`hedest.analysis.plots.plot_matrix`.
+
+        Returns:
+            The figure.
+        """
+
+        matrix = self.neighbor_distances(max_distance=max_distance)
+        unit = "µm" if self.mpp is not None else "px"
+        kwargs.setdefault("mask_upper", True)
+        kwargs.setdefault("annot", len(matrix) <= 20)
+        kwargs.setdefault("fmt", ".0f" if self.mpp is not None else ".1f")
+        kwargs.setdefault("title", "mean distance between neighbours")
+
+        return plots.plot_matrix(matrix, cbar_label=f"mean distance ({unit})", savefig=savefig, **kwargs)
 
     def plot_colocalization_graph(
         self,
-        display: bool = True,
-        figsize: tuple = (8, 8),
-        curvature: float = 0.3,
+        max_distance: Optional[float] = None,
         min_threshold: float = 0.05,
-        fontsize: int = 12,
-    ) -> Optional[plt.Figure]:
+        curvature: float = 0.25,
+        self_loops: bool = True,
+        fontsize: int = 11,
+        figsize: Tuple[float, float] = (8.0, 8.0),
+        savefig: Optional[str] = None,
+    ) -> Figure:
         """
-        Plots a circular graph where:
-        - Node size is proportional to cell count
-        - Arrows show directional neighborhood influence
-        - Arrows are curved in opposite directions for A->B and B->A
+        Neighbourhood as a circular graph: node size is the number of cells, an arrow from A
+        to B means that cells of type A have B among their neighbours.
+
+        A loop on a node is the share of a cell type's neighbours that are of its own type,
+        which is usually the largest term by far: without it a cell type that sits among its
+        own kind, such as a ciliated epithelium lining a lumen, looks disconnected when in
+        fact it is the most clustered of all.
 
         Args:
-            display: Whether to display the plot.
-            figsize: Size of the figure.
-            curvature: Curvature of arrows between nodes.
-            min_threshold: Minimum weight threshold to draw an arrow.
-            fontsize: Font size for cell type labels.
-        """
-
-        if self.neighborhood_aggregates is None:
-            text1 = "Attribute `neighborhood_aggregates` is None. "
-            text2 = "Computing neighborhood composition with default parameters..."
-            print(text1 + text2)
-            self.compute_neighborhood_composition()
-
-        # All unique cell types
-        cell_types = sorted(
-            set(self.neighborhood_aggregates) | {ct for d in self.neighborhood_aggregates.values() for ct in d}
-        )
-
-        # Count cells per type from predicted labels
-        node_counts = Counter([v["cell_type"] for v in self.predicted_labels.values()])
-
-        # Normalize node sizes for plotting
-        min_size, max_size = 10, 500
-        raw_counts = np.array([node_counts[ct] for ct in cell_types])
-        norm_sizes = min_size + (raw_counts - raw_counts.min()) / (raw_counts.ptp() + 1e-6) * (max_size - min_size)
-        node_size_dict = dict(zip(cell_types, norm_sizes))
-
-        # Layout in circle
-        G = nx.DiGraph()
-        G.add_nodes_from(cell_types)
-        pos = nx.circular_layout(G)
-
-        # Track edges we've drawn already to apply symmetric curvature
-        drawn_edges = set()
-
-        # Plot
-        fig, ax = plt.subplots(figsize=figsize)
-        ax.axis("off")
-
-        name_to_rgba = {
-            v[0]: tuple(c / 255 for c in v[1]) for v in self.color_dict.values()  # normalize for matplotlib
-        }
-
-        # Draw nodes (circles)
-        for ct in cell_types:
-            x, y = pos[ct]
-            ax.scatter(x, y, s=node_size_dict[ct], color=name_to_rgba[ct], zorder=3)
-            label_offset = 0.16
-            dx, dy = x, y
-            norm = (dx**2 + dy**2) ** 0.5
-            offset_x = x + label_offset * dx / norm
-            offset_y = y + label_offset * dy / norm
-
-            ax.text(offset_x, offset_y, ct, ha="center", va="center", fontsize=fontsize)
-
-        # Draw all arrows with curvature handling
-        for src in cell_types:
-            targets = self.neighborhood_aggregates.get(src, {})
-            for tgt, weight in targets.items():
-                if weight < min_threshold:
-                    continue
-
-                if src == tgt and weight >= min_threshold:
-                    x, y = pos[src]
-                    color = name_to_rgba[src]
-
-                    # Direction vector from center
-                    dx, dy = x, y
-                    norm = (dx**2 + dy**2) ** 0.5
-                    ux, uy = dx / norm, dy / norm
-
-                    # Perpendicular unit vector
-                    px, py = -uy, ux
-
-                    # Control points for smooth oval loop
-                    loop_size = 0.3
-                    offset = 0.4
-
-                    # Control point 1 (move outwards and to one side)
-                    ctrl1 = (x + offset * ux + loop_size * px, y + offset * uy + loop_size * py)
-                    # Control point 2 (return from other side)
-                    ctrl2 = (x + offset * ux - loop_size * px, y + offset * uy - loop_size * py)
-
-                    # Path vertices
-                    path_data = [
-                        (Path.MOVETO, (x, y)),
-                        (Path.CURVE4, ctrl1),
-                        (Path.CURVE4, ctrl2),
-                        (Path.CURVE4, (x, y)),
-                    ]
-                    codes, verts = zip(*path_data)
-                    path = Path(verts, codes)
-
-                    # Transparent body of loop
-                    patch = PathPatch(
-                        path,
-                        facecolor="none",
-                        edgecolor=color,
-                        lw=2 * weight + 0.3,
-                        alpha=0.5,  # transparent line
-                        zorder=1,
-                    )
-                    ax.add_patch(patch)
-
-                    # Arrowhead at the end
-                    arrow = FancyArrowPatch(
-                        posA=ctrl2,
-                        posB=(x, y),
-                        arrowstyle="->",
-                        color=color,
-                        lw=0,
-                        mutation_scale=15,
-                        alpha=1.0,
-                        zorder=2,
-                    )
-                    ax.add_patch(arrow)
-                    continue
-
-                if (src, tgt) in drawn_edges or (tgt, src) in drawn_edges:
-                    # If both directions exist, use symmetric curvatures
-                    direction = +1 if (src, tgt) not in drawn_edges else -1
-                    rad = direction * curvature
-                else:
-                    # First appearance of this pair, check if reciprocal exists
-                    rad = curvature
-                    if tgt in self.neighborhood_aggregates and src in self.neighborhood_aggregates[tgt]:
-                        drawn_edges.add((src, tgt))  # mark that one direction is drawn
-
-                # Draw the arrow
-                src_pos = pos[src]
-                tgt_pos = pos[tgt]
-                color = name_to_rgba[src]
-
-                # Transparent arrow body
-                arrow_line = FancyArrowPatch(
-                    posA=src_pos,
-                    posB=tgt_pos,
-                    arrowstyle="-",
-                    connectionstyle=f"arc3,rad={rad}",
-                    color=color,
-                    lw=2 * weight + 0.3,
-                    alpha=0.5,
-                    shrinkA=18,
-                    shrinkB=18,
-                    zorder=1,
-                )
-                ax.add_patch(arrow_line)
-
-                # Opaque arrowhead
-                arrow_head = FancyArrowPatch(
-                    posA=src_pos,
-                    posB=tgt_pos,
-                    arrowstyle="-|>",
-                    connectionstyle=f"arc3,rad={rad}",
-                    color=color,
-                    lw=0,  # no line
-                    mutation_scale=15,
-                    alpha=1.0,
-                    shrinkA=11,
-                    shrinkB=11,
-                    zorder=2,
-                )
-                ax.add_patch(arrow_head)
-
-        if display:
-            plt.show()
-            return None
-        else:
-            plt.close(fig)
-            return fig
-
-    def _build_delaunay_graph(
-        self, compute_dist: str = "centroid", max_distance: Optional[float] = None
-    ) -> Dict[str, List[str]]:
-        """
-        Builds a Delaunay triangulation graph from segmentation centroids.
-        Each cell is a node and neighbors are connected by edges, optionally filtered by a distance threshold.
-
-        Args:
-            compute_dist: The method to compute distances ("centroid" or "contour").
-            max_distance: Maximum allowed distance between neighbors. If None, no filtering.
+            max_distance: Passed to :meth:`neighbors`.
+            min_threshold: Hides arrows below this share of neighbours.
+            curvature: Curvature of the arrows, so A to B and B to A stay distinguishable.
+            self_loops: Whether to draw the diagonal of the composition as a loop on each
+                node, labelled with its share.
+            fontsize: Size of the cell-type labels.
+            figsize: Figure size.
+            savefig: Path to write the figure to.
 
         Returns:
-            Mapping of cell_id to list of neighboring cell_ids.
+            The figure.
         """
 
-        if self.seg_dict_w_class is None:
-            raise ValueError(
-                "No segmentation with predicted classes found. Please run `_generate_dicts_viz_pred` first."
+        from matplotlib.patches import Circle
+        from matplotlib.patches import FancyArrowPatch
+
+        composition = self.neighborhood_composition(max_distance=max_distance)
+        counts = self.labels.value_counts()
+        present = [ct for ct in self.ct_list if counts.get(ct, 0) > 0]
+        if not present:
+            raise ValueError("No predicted cell to draw.")
+
+        angles = np.linspace(0, 2 * np.pi, len(present), endpoint=False)
+        positions = {ct: np.array([np.cos(angle), np.sin(angle)]) for ct, angle in zip(present, angles)}
+        largest = float(counts.reindex(present).max())
+
+        # Nodes are drawn as patches rather than scatter markers, so their radius is known
+        # in data units: the arrows, the loops and the labels are all placed from it.
+        radii = {ct: 0.05 + 0.10 * float(np.sqrt(counts.get(ct, 0) / largest)) for ct in present}
+        loop_radius = 0.13
+        label_radius = 1.0 + max(radii.values()) + (2 * loop_radius if self_loops else 0.0) + 0.06
+        labels = {ct: plots.wrap_name(ct) for ct in present}
+        longest = max(len(line) for ct in present for line in labels[ct].splitlines())
+        # A character is about 0.58 point wide per point of font size. Long cell-type names
+        # get a smaller font, and the view is widened so that the labels of the left-most
+        # and right-most nodes fit; its height only has to hold the labels of the top and
+        # bottom ones, so the figure is as flat as the view and nothing is wasted.
+        fontsize = float(np.clip(fontsize * 16.0 / max(longest, 1), 7.0, fontsize))
+        text_inches = 0.58 * fontsize / 72.0 * longest
+        limit = label_radius / max(1.0 - 2.0 * text_inches / figsize[0], 0.3)
+        y_limit = label_radius + 0.55
+
+        fig, ax = plt.subplots(figsize=(figsize[0], figsize[0] * y_limit / limit))
+        ax.set_xlim(-limit, limit)
+        ax.set_ylim(-y_limit, y_limit)
+        ax.set_aspect("equal")
+        ax.axis("off")
+        points_per_unit = figsize[0] * 72.0 / (2.0 * limit)
+
+        for source in present:
+            for target in present:
+                if source == target:
+                    continue
+                weight = composition.loc[source, target]
+                if not np.isfinite(weight) or weight < min_threshold:
+                    continue
+                arrow = FancyArrowPatch(
+                    posA=positions[source],
+                    posB=positions[target],
+                    arrowstyle="-|>",
+                    connectionstyle=f"arc3,rad={curvature}",
+                    color=self.palette.rgb(source),
+                    linewidth=1.0 + 4.0 * float(weight),
+                    alpha=0.75,
+                    mutation_scale=14,
+                    shrinkA=radii[source] * points_per_unit + 2.0,
+                    shrinkB=radii[target] * points_per_unit + 2.0,
+                )
+                ax.add_patch(arrow)
+
+        for cell_type in present:
+            position = positions[cell_type]
+            share = float(composition.loc[cell_type, cell_type])
+            share = share if np.isfinite(share) else 0.0
+
+            if self_loops and share >= min_threshold:
+                # A circle tangent to the node, pointing away from the centre of the graph,
+                # left open where it meets the node and closed by an arrow head.
+                center = position * (1.0 + radii[cell_type] + loop_radius)
+                back = np.arctan2(-position[1], -position[0])
+                theta = np.linspace(back + 0.55, back + 2 * np.pi - 0.55, 120)
+                curve = center + loop_radius * np.column_stack([np.cos(theta), np.sin(theta)])
+                color = self.palette.rgb(cell_type)
+                width = 1.0 + 4.0 * share
+                ax.plot(curve[:, 0], curve[:, 1], color=color, linewidth=width, alpha=0.75, zorder=2)
+                ax.add_patch(
+                    FancyArrowPatch(
+                        posA=curve[-3],
+                        posB=curve[-1],
+                        arrowstyle="-|>",
+                        color=color,
+                        linewidth=width,
+                        alpha=0.75,
+                        mutation_scale=14,
+                    )
+                )
+
+            ax.add_patch(
+                Circle(
+                    position,
+                    radii[cell_type],
+                    facecolor=self.palette.rgb(cell_type),
+                    edgecolor="black",
+                    linewidth=0.6,
+                    zorder=3,
+                )
             )
 
-        nuc_dict = self.seg_dict_w_class["nuc"]
-        coords = np.array([v["centroid"] for v in nuc_dict.values()])
-        cell_ids = list(nuc_dict.keys())
+            x, y = position * label_radius
+            ax.text(
+                x,
+                y,
+                f"{labels[cell_type]}\n{int(counts.get(cell_type, 0)):,} cells · {share:.0%} self",
+                ha="left" if position[0] > 0.15 else ("right" if position[0] < -0.15 else "center"),
+                va="bottom" if position[1] > 0.15 else ("top" if position[1] < -0.15 else "center"),
+                fontsize=fontsize,
+            )
 
-        tri = Delaunay(coords)
-        neighbors = defaultdict(set)
+        ax.set_title("neighbourhood graph (arrow and loop width = share of neighbours)", fontsize=11, loc="left")
 
-        for simplex in tri.simplices:
-            for i in range(3):
-                a, b = simplex[i], simplex[(i + 1) % 3]
-                cell_a, cell_b = cell_ids[a], cell_ids[b]
+        return plots.close(fig, savefig)
 
-                # Distance filtering
-                if max_distance is not None:
-                    if compute_dist == "centroid":
-                        dist = np.linalg.norm(coords[a] - coords[b])
-                    elif compute_dist == "contour":
-                        contour_a = np.array(nuc_dict[cell_a]["contour"])
-                        contour_b = np.array(nuc_dict[cell_b]["contour"])
-                        dist = np.min(np.linalg.norm(contour_a[:, None, :] - contour_b[None, :, :], axis=-1))
-                    else:
-                        raise ValueError(f"Unknown compute_dist method: {compute_dist}")
-
-                    if dist > max_distance:
-                        continue
-
-                neighbors[cell_a].add(cell_b)
-                neighbors[cell_b].add(cell_a)
-
-        return {k: list(v) for k, v in neighbors.items()}
-
-    @require_attributes("spot_dict")
-    def _get_predicted_proportions(self) -> pd.DataFrame:
+    def compare_area(
+        self,
+        cell_types: Optional[Sequence[str]] = None,
+        tests: Optional[Sequence[Sequence[str]]] = None,
+        figsize: Tuple[float, float] = (9.0, 5.0),
+        savefig: Optional[str] = None,
+    ) -> Figure:
         """
-        Computes predicted proportions of cell types for each spot.
-
-        Returns:
-            DataFrame with predicted proportions per spot.
-        """
-
-        spot_proportions = {}
-
-        for spot_id, cell_ids in self.spot_dict.items():
-            spot_cells = self.predictions.loc[self.predictions.index.isin(cell_ids)]
-            spot_proportions[spot_id] = spot_cells.mean(axis=0)
-
-        predicted_proportions_df = pd.DataFrame.from_dict(spot_proportions, orient="index")
-        predicted_proportions_df.index.name = "spot"
-
-        return predicted_proportions_df
-
-    def _get_labels_slide(self, data) -> Dict[str, Dict[str, Any]]:
-        """
-        Generates a dictionary mapping cell IDs to predicted labels.
+        Nucleus area per predicted cell type, as box plots, with optional one-sided
+        Mann-Whitney tests.
 
         Args:
-            data: DataFrame with predicted probabilities per cell.
+            cell_types: Cell types to compare. Defaults to every type with cells.
+            tests: Pairs ``[a, b]`` to test for "a greater than b".
+            figsize: Figure size.
+            savefig: Path to write the figure to.
 
         Returns:
-            Mapping of cell IDs to predicted labels.
+            The figure. The test results are also logged.
         """
 
-        predicted_classes = data.idxmax(axis=1)
+        import seaborn as sns
 
-        predicted_class_indices = predicted_classes.map(data.columns.get_loc)
+        areas = self.cell_areas()
+        labels = self.labels.reindex(areas.index)
+        available = [ct for ct in (cell_types or self.ct_list) if (labels == ct).any()]
+        if not available:
+            raise ValueError("No predicted cell has a contour for the requested cell types.")
 
-        predicted_labels = {
-            cell_id: {"class": cls_idx, "cell_type": cls}
-            for cell_id, cls_idx, cls in zip(data.index, predicted_class_indices, predicted_classes)
-        }
+        frame = pd.DataFrame({"cell_type": labels, "area": areas}).dropna()
+        frame = frame[frame["cell_type"].isin(available)]
+        unit = "µm²" if self.mpp is not None else "px²"
 
-        return predicted_labels
+        fig, ax = plt.subplots(figsize=figsize)
+        sns.boxplot(
+            data=frame,
+            x="cell_type",
+            y="area",
+            hue="cell_type",
+            order=available,
+            palette={ct: self.palette.rgb(ct) for ct in available},
+            legend=False,
+            fliersize=1,
+            ax=ax,
+        )
+        ax.set_yscale("log")
+        ax.set_xlabel("")
+        ax.set_ylabel(f"nucleus area ({unit})")
+        ax.set_xticks(range(len(available)))
+        ax.set_xticklabels(available, rotation=40, ha="right", fontsize=9)
 
-    def _generate_dicts_viz_pred(self, seg_dict: Dict[str, Any]) -> None:
+        if tests:
+            top = float(frame["area"].max())
+            step = 0.12
+            for position, (type_a, type_b) in enumerate(tests):
+                if type_a not in available or type_b not in available:
+                    logger.warning(f"Skipping the test {type_a} > {type_b}: one of them has no cell.")
+                    continue
+                areas_a = frame.loc[frame["cell_type"] == type_a, "area"].to_numpy()
+                areas_b = frame.loc[frame["cell_type"] == type_b, "area"].to_numpy()
+                statistic, p_value = mannwhitneyu(areas_a, areas_b, alternative="greater")
+                stars = "***" if p_value <= 1e-3 else "**" if p_value <= 1e-2 else "*" if p_value <= 5e-2 else "ns"
+                logger.info(f"{type_a} > {type_b}: U={statistic:.0f}, p={p_value:.3e} ({stars})")
+
+                x1, x2 = available.index(type_a), available.index(type_b)
+                height = top * (1.0 + step) ** (position + 1)
+                ax.plot([x1, x1, x2, x2], [height, height * 1.05, height * 1.05, height], lw=1.1, c="black")
+                ax.text(
+                    (x1 + x2) / 2, height * 1.08, f"p={p_value:.1e} ({stars})", ha="center", va="bottom", fontsize=9
+                )
+
+        return plots.close(fig, savefig)
+
+    # ------------------------------------------------------------------ slide views
+
+    def visualizer(self, with_labels: bool = True, **kwargs: Any) -> Any:
         """
-        Updates the segmentation dictionary with predicted classes.
+        Builds a :class:`~hedest.analysis.postseg.SlideVisualizer` for this run, with the
+        predicted cell types and the palette already attached.
 
         Args:
-            seg_dict: Dictionary containing segmentation data.
+            with_labels: Whether to colour the nuclei by predicted cell type.
+            **kwargs: Overrides passed to the visualizer.
+
+        Returns:
+            The visualizer.
         """
 
-        self.seg_dict_w_class = {
+        from hedest.analysis.postseg import SlideVisualizer
+
+        self._require(slide_path=self.slide_path)
+        arguments = dict(
+            slide_path=self.slide_path,
+            adata=self.adata,
+            adata_name=self.adata_name,
+            seg=self.seg_dict,
+            labels=self.labels if with_labels else None,
+            palette=self.palette,
+            mpp=self.mpp,
+        )
+        arguments.update(kwargs)
+
+        return SlideVisualizer(**arguments)
+
+    # ------------------------------------------------------------------ exports
+
+    def seg_dict_with_labels(self) -> Dict[str, Any]:
+        """
+        The segmentation dictionary with the HEDeST cell type written into each nucleus, in
+        the format the overlays and the GeoJSON export expect.
+
+        Returns:
+            A new segmentation dictionary holding only the predicted cells.
+        """
+
+        self._require(seg=self.seg_dict)
+        nuc = self.seg_dict["nuc"]  # type: ignore[index]
+        labels = self.labels
+
+        return {
             "nuc": {
-                key: {
-                    **value,
-                    "type": self.predicted_labels[key]["class"],
-                }
-                for key, value in seg_dict["nuc"].items()
-                if key in self.predicted_labels
+                cell_id: {**value, "type": self.palette.index(labels[cell_id])}
+                for cell_id, value in nuc.items()
+                if cell_id in labels.index
             }
         }
+
+    def export_predictions(self, path: Union[str, Path], with_probabilities: bool = True) -> Path:
+        """
+        Writes one row per cell: its predicted type, its confidence, its position and,
+        optionally, the whole probability vector.
+
+        Args:
+            path: Destination CSV file.
+            with_probabilities: Whether to append one column per cell type.
+
+        Returns:
+            The path written.
+        """
+
+        table = self.label_table()
+        if with_probabilities:
+            table = table.join(self.predictions.add_prefix("p_"))
+
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        table.to_csv(path, index_label="cell_id")
+        logger.info(f"{len(table)} predictions written to {path}")
+
+        return path
+
+    def export_geojson(self, path: Union[str, Path]) -> Path:
+        """
+        Writes the predictions as a QuPath-compatible GeoJSON.
+
+        Args:
+            path: Destination file.
+
+        Returns:
+            The path written.
+        """
+
+        from hedest.utils import seg_dict_to_geojson
+
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        seg_dict_to_geojson(self.seg_dict_with_labels(), str(path), color_dict=self.palette.as_geojson_dict())
+
+        return path
+
+
+def _figure_to_array(fig: Figure) -> np.ndarray:
+    """
+    Rasterises a figure so it can be embedded as an image in another figure.
+
+    Args:
+        fig: The figure to rasterise.
+
+    Returns:
+        An RGBA array.
+    """
+
+    import io
+
+    from PIL import Image
+
+    buffer = io.BytesIO()
+    fig.savefig(buffer, format="png", dpi=150, bbox_inches="tight")
+    buffer.seek(0)
+
+    return np.asarray(Image.open(buffer))
+
+
+__all__ = ["PredAnalyzer"]

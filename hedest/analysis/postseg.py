@@ -1,14 +1,26 @@
+"""
+Looking at a slide: the tissue, the segmentation, the spots and the predictions.
+
+:class:`SlideVisualizer` is usable at any point of the workflow. Right after segmentation it
+shows the nuclei; with an AnnData object it adds the spots; with cell labels, from HEDeST or
+from anywhere else, it colours the nuclei by cell type.
+
+It reads through OpenSlide directly, not through the vendored HoVer-Net handler, so the
+analysis package does not depend on ``external/``. Two consequences worth knowing:
+
+- the window is always given in **full-resolution (level 0) coordinates**, whatever
+  resolution the region is actually read at;
+- a large window is read from the pyramid level that is just fine enough for the requested
+  output size, and single-level slides are read in tiles and downsampled, so asking for a
+  whole-slide view of a 26 000 x 26 000 slide costs a few hundred megabytes, not a few
+  gigabytes.
+"""
 from __future__ import annotations
 
 import base64
 import io
-import json
 import math
-import os
-import pathlib
-from abc import ABC
-from abc import abstractmethod
-from collections import defaultdict
+from collections.abc import Sequence
 from typing import Any
 from typing import Dict
 from typing import List
@@ -19,852 +31,1066 @@ from typing import Union
 import cv2
 import matplotlib.pyplot as plt
 import numpy as np
+import openslide
 import pandas as pd
-import plotly.graph_objects as go
 from anndata import AnnData
 from loguru import logger
+from matplotlib.figure import Figure
 from PIL import Image
-from plotly.subplots import make_subplots
 from scipy.spatial import Delaunay
-from scipy.spatial import KDTree
-from tqdm import tqdm
 
-from external.hovernet.misc.wsi_handler import get_file_handler
-from hedest.config import TqdmToLogger
-from hedest.utils import check_json_classification
-from hedest.utils import remove_empty_keys
-from hedest.utils import seg_colors_compatible
+from hedest.analysis.palette import OTHER_LABEL
+from hedest.analysis.palette import Palette
+from hedest.analysis.plots import close
+from hedest.analysis.plots import plot_celltype_points
+from hedest.slide import read_mpp
+from hedest.spots import load_seg_dict
+from hedest.spots import spot_geometry
 
-tqdm_out = TqdmToLogger(logger, level="INFO")
+# A full-slide read is capped at this many pixels on the longest side.
+DEFAULT_MAX_PIXELS = 4000
+# Size of the tiles used when a slide has no suitable pyramid level.
+READ_TILE = 2048
+# Below this many pixels per nucleus, contours are not worth drawing.
+MIN_PIXELS_PER_NUCLEUS = 6.0
+
+Window = Union[str, Tuple[Tuple[float, float], Tuple[float, float]]]
 
 
-class SlideVisualizer(ABC):
+class Region:
+    """
+    A region of a slide, read at some downsample.
+
+    Attributes:
+        image: The pixels, as an ``(h, w, 3)`` uint8 array.
+        origin: Top-left corner of the region, in level-0 coordinates.
+        size: Width and height of the region, in level-0 pixels.
+        downsample: How much the image is downsampled relative to level 0.
+    """
+
+    def __init__(self, image: np.ndarray, origin: Tuple[float, float], size: Tuple[float, float], downsample: float):
+        self.image = image
+        self.origin = (float(origin[0]), float(origin[1]))
+        self.size = (float(size[0]), float(size[1]))
+        self.downsample = float(downsample)
+
+    def __repr__(self) -> str:
+        return (
+            f"Region(origin={self.origin}, size={self.size}, "
+            f"downsample={self.downsample:.2f}, shape={self.image.shape})"
+        )
+
+    @property
+    def extent(self) -> Tuple[float, float, float, float]:
+        """``(left, right, bottom, top)`` in level-0 coordinates, for ``imshow``."""
+
+        return (
+            self.origin[0],
+            self.origin[0] + self.size[0],
+            self.origin[1] + self.size[1],
+            self.origin[1],
+        )
+
+    def to_local(self, coordinates: np.ndarray) -> np.ndarray:
+        """
+        Converts level-0 coordinates into pixel coordinates inside ``image``.
+
+        Args:
+            coordinates: An ``(n, 2)`` array of (x, y) positions.
+
+        Returns:
+            The positions in the region's own pixel grid.
+        """
+
+        return (np.asarray(coordinates, dtype="float64") - np.asarray(self.origin)) / self.downsample
+
+    def contains(self, coordinates: np.ndarray, margin: float = 0.0) -> np.ndarray:
+        """
+        Tells which points fall inside the region.
+
+        Args:
+            coordinates: An ``(n, 2)`` array of (x, y) level-0 positions.
+            margin: Extra tolerance, in level-0 pixels.
+
+        Returns:
+            A boolean mask.
+        """
+
+        points = np.asarray(coordinates, dtype="float64")
+        x0, y0 = self.origin
+        x1, y1 = x0 + self.size[0], y0 + self.size[1]
+
+        return (
+            (points[:, 0] >= x0 - margin)
+            & (points[:, 0] <= x1 + margin)
+            & (points[:, 1] >= y0 - margin)
+            & (points[:, 1] <= y1 + margin)
+        )
+
+
+class SlideVisualizer:
+    """
+    Draws a slide with any combination of segmentation, spots and cell labels on top.
+
+    Attributes:
+        dimensions: Full-resolution size of the slide, as (width, height).
+        mpp: Microns per pixel, either the one given or the one read from the slide.
+        cell_ids: Ids of the segmented nuclei, in segmentation-file order.
+        centroids: ``(n_cells, 2)`` array of nucleus centroids.
+        palette: The colours in use.
+    """
+
     def __init__(
         self,
-        image_path: str,
+        slide_path: str,
         adata: Optional[AnnData] = None,
         adata_name: Optional[str] = None,
-        seg_dict: Optional[Union[str, Dict[str, Any]]] = None,
-        color_dict: Optional[Dict[str, Tuple[str, Tuple[int, int, int]]]] = None,
+        seg: Optional[Union[str, Dict[str, Any]]] = None,
+        labels: Optional[Union[Dict[str, str], pd.Series]] = None,
+        palette: Optional[Palette] = None,
+        mpp: Optional[float] = None,
     ) -> None:
         """
-        Initializes the SlideVisualizer.
+        Opens a slide and, when given, loads the segmentation and the spots.
 
         Args:
-            image_path: Path to the histological image.
-            adata: Optional Anndata object containing Visium data.
-            adata_name: Name of the dataset in the adata object.
-            seg_dict: Segmentation dictionary or path to a JSON file.
-            color_dict: Dictionary mapping cell types to color tuples.
+            slide_path: Path to the slide. Anything OpenSlide can read; if it cannot, run
+                ``python hedest/pipeline.py check <slide> --convert`` first.
+            adata: AnnData object holding the spatial transcriptomics data, for the spots.
+            adata_name: Key under ``adata.uns['spatial']``. Inferred when there is only one.
+            seg: Segmentation dictionary or path to a HoVer-Net style JSON file.
+            labels: Cell type per cell id, for instance
+                ``PredAnalyzer.labels`` or the HoVer-Net types. When given, nuclei are
+                coloured by cell type instead of a single colour.
+            palette: Colours to use. Built from the labels when not given.
+            mpp: Microns per pixel. Read from the slide when not given, and used for the
+                spot diameter and for the scale bars.
         """
 
-        self.image_path = image_path
+        self.slide_path = slide_path
+        try:
+            self.slide = openslide.OpenSlide(slide_path)
+        except openslide.OpenSlideError as err:
+            raise ValueError(
+                f"OpenSlide cannot read {slide_path}. Convert it first with "
+                f"'python hedest/pipeline.py check {slide_path} --convert'."
+            ) from err
+
+        self.dimensions: Tuple[int, int] = self.slide.dimensions
+        self.mpp = mpp if mpp is not None else read_mpp(self.slide)
+        self._thumbnails: Dict[int, Region] = {}
+
+        self.seg_dict: Optional[Dict[str, Any]] = None
+        self.cell_ids: List[str] = []
+        self.centroids = np.empty((0, 2), dtype="float64")
+        self._contours: List[np.ndarray] = []
+        self._seg_types: List[str] = []
+
+        if seg is not None:
+            self._load_segmentation(seg)
+
         self.adata = adata
         self.adata_name = adata_name
-        self.seg_dict = seg_dict
-        self.color_dict = color_dict
-        self.spots_center = None
-        self.spots_diameter = None
+        self.spots = None
+        if adata is not None:
+            if adata_name is None:
+                spatial = adata.uns.get("spatial", {})
+                if len(spatial) != 1:
+                    raise ValueError(
+                        "adata_name is required when adata.uns['spatial'] does not hold exactly one sample "
+                        f"(found {list(spatial)})."
+                    )
+                self.adata_name = next(iter(spatial))
+            self.spots = spot_geometry(adata, self.adata_name, mpp=self.mpp)
 
-        # Check Visium data
-        if self.adata is not None and self.adata_name is not None:
-            try:
-                self.spots_center = self.adata.obsm["spatial"].astype("int64")
-                self.spots_diameter = self.adata.uns["spatial"][self.adata_name]["scalefactors"][
-                    "spot_diameter_fullres"
-                ]
-                print("Visium data found.")
-            except ValueError:
-                raise ValueError(
-                    f"Impossible to retrieve information. Either this is Visium data, but"
-                    f"‘{self.adata_name}’ was not found, or it's not Visium data."
-                    "Please check the format and annotations of the data."
-                )
-        elif self.adata is None:
-            print("No Visium data provided. You won't be able to plot Visium spots.")
+        self.labels: Optional[Dict[str, str]] = None
+        self.palette = palette
+        if labels is not None:
+            self.set_labels(labels, palette=palette)
+        elif palette is None and self._seg_types:
+            self.palette = Palette(sorted(set(self._seg_types)))
 
-        elif self.adata is not None and self.adata_name is None:
-            raise ValueError("Please provide the name of the dataset in the adata object.")
+    def __repr__(self) -> str:
+        parts = [f"slide={self.slide_path}", f"dimensions={self.dimensions}"]
+        if self.mpp is not None:
+            parts.append(f"mpp={self.mpp:.4f}")
+        parts.append(f"cells={len(self.cell_ids)}")
+        parts.append(f"spots={0 if self.spots is None else len(self.spots.ids)}")
+        parts.append(f"labelled={'yes' if self.labels else 'no'}")
 
-        # check seg_dict and open it
-        if isinstance(seg_dict, str) and os.path.isfile(seg_dict):
-            if seg_dict.endswith(".json"):
-                with open(seg_dict) as json_file:
-                    self.data = json.load(json_file)
-            else:
-                raise ValueError("seg_dict must be a JSON file if given as a path.")
-        elif isinstance(seg_dict, dict) or seg_dict is None:
-            self.data = seg_dict
-        else:
-            raise ValueError("seg_dict must be a path to a JSON file or a dictionary.")
+        return f"SlideVisualizer({', '.join(parts)})"
 
-        # check color_dict
-        if self.data is not None:
-            if self.color_dict is None:
-                if check_json_classification(self.data):
-                    error1 = "color_dict must be provided if seg_dict is a JSON file with classified cells.\n"
-                    error2 = "You can create one with basics.generate_color_dict()."
-                    raise ValueError(error1 + error2)
-                else:
-                    self.color_dict = {"None": ("Unkwnown", (0, 0, 0))}
+    def close_slide(self) -> None:
+        """Releases the OpenSlide handle."""
 
-            elif self.color_dict is not None:
-                if not check_json_classification(self.data):
-                    print("Warning : You gave a color_dict but the JSON file gives no classification.")
-                    self.color_dict = {"None": ("Unkwnown", (0, 0, 0))}
+        self.slide.close()
 
-                elif not seg_colors_compatible(self.data, self.color_dict):
-                    raise ValueError("Some labels found in your data have not been found in the color dictionnary.")
+    # ------------------------------------------------------------------ loading
 
-        # Extract nuclear info
-        if self.data is not None:
-            self.nuc_info = self.data["nuc"]
-            self.contour_list_wsi = []
-            self.type_list_wsi = []
-            self.id_list_wsi = []
-            self.centroid_list_wsi = []
-            for inst in self.nuc_info:
-                inst_info = self.nuc_info[inst]
-                self.contour_list_wsi.append(inst_info["contour"])
-                self.type_list_wsi.append(inst_info["type"])
-                self.id_list_wsi.append(inst)
-                self.centroid_list_wsi.append(inst_info["centroid"])
-
-        # Initialize slide handler
-        self.wsi_obj = get_file_handler(self.image_path, pathlib.Path(self.image_path).suffix)
-        self.mag_info = self.wsi_obj.metadata["base_mag"]
-        self.wsi_obj.prepare_reading(read_mag=self.mag_info)
-        self.original_size = self.wsi_obj.file_ptr.level_dimensions[-1]
-        self.overlaid_output = None
-
-    def plot_specific_spot(
-        self,
-        spot_id: Optional[str] = None,
-        figsize: Tuple[int, int] = (12, 10),
-        display: bool = True,
-    ) -> Optional[plt.Figure]:
+    def _load_segmentation(self, seg: Union[str, Dict[str, Any]]) -> None:
         """
-        Plots a specific Visium spot with its segmentation contours.
+        Loads the nuclei into flat arrays.
 
         Args:
-            spot_id: ID of the Visium spot to plot. Randomly selected if None.
-            figsize: Size of the plot.
-            display: Whether to display the plot or return the figure.
+            seg: Segmentation dictionary or path to a HoVer-Net style JSON file.
+        """
+
+        self.seg_dict = load_seg_dict(seg)
+        nuc = self.seg_dict["nuc"]
+
+        self.cell_ids = list(nuc.keys())
+        self.centroids = np.asarray([nuc[cell_id]["centroid"] for cell_id in self.cell_ids], dtype="float64")
+        self._contours = [np.asarray(nuc[cell_id]["contour"], dtype="float64") for cell_id in self.cell_ids]
+        self._seg_types = [str(nuc[cell_id].get("type")) for cell_id in self.cell_ids]
+        logger.info(f"Loaded {len(self.cell_ids)} nuclei from the segmentation.")
+
+    def set_labels(
+        self,
+        labels: Union[Dict[str, str], pd.Series],
+        palette: Optional[Palette] = None,
+    ) -> "SlideVisualizer":
+        """
+        Attaches a cell type to each nucleus, so the overlays are coloured by cell type.
+
+        Args:
+            labels: Cell type per cell id.
+            palette: Colours to use. Built from the cell types when not given.
 
         Returns:
-            The plotted figure if display is False.
+            The visualizer, so calls can be chained.
         """
 
-        assert self.adata is not None, "Please create a SlideVisualizer object with adata."
-        spots_coordinates = pd.DataFrame(self.spots_center, columns=["x", "y"])
-        spots_coordinates["id"] = self.adata.obs.index
+        self.labels = dict(labels.items()) if isinstance(labels, pd.Series) else dict(labels)
 
-        if spot_id is None:
-            spot_id = np.random.choice(spots_coordinates["id"])
-            print(f"Randomly selected spot_id: {spot_id}")
+        if palette is not None:
+            self.palette = palette
+        elif self.palette is None:
+            self.palette = Palette(sorted(set(self.labels.values())))
 
-        spot_x, spot_y = spots_coordinates[spots_coordinates["id"] == spot_id][["x", "y"]].values[0]
-        img_diam = int(self.spots_diameter + 50)
-        window = ((spot_x - img_diam / 2, spot_y - img_diam / 2), (img_diam, img_diam))
+        if self.cell_ids:
+            missing = len(self.cell_ids) - sum(cell_id in self.labels for cell_id in self.cell_ids)
+            if missing:
+                logger.info(f"{missing}/{len(self.cell_ids)} nuclei have no label, drawn as '{OTHER_LABEL}'.")
 
-        if self.seg_dict is not None:
-            fig = self.plot_seg(window, show_visium=True, title=f"Spot ID: {spot_id}", display=display, figsize=figsize)
-        else:
-            fig = self.plot_slide(
-                window, show_visium=True, title=f"Spot ID: {spot_id}", display=display, figsize=figsize
-            )
+        return self
 
-        return fig
-
-    def _set_window(self, window: Union[str, Tuple[Tuple[int, int], Tuple[int, int]]]) -> None:
+    def cell_types(self) -> List[str]:
         """
-        Sets the current viewing window for the slide.
+        Returns the cell type of every nucleus, in segmentation order.
+
+        Falls back to the ``type`` field of the segmentation when no labels are attached.
+        """
+
+        if self.labels is not None:
+            return [self.labels.get(cell_id, OTHER_LABEL) for cell_id in self.cell_ids]
+
+        return list(self._seg_types)
+
+    # ------------------------------------------------------------------ reading
+
+    def _resolve_window(self, window: Window) -> Tuple[Tuple[float, float], Tuple[float, float]]:
+        """
+        Turns a window argument into an origin and a size, clipped to the slide.
 
         Args:
-            window: The (x, y, width, height) of the region to display. "full" for the entire slide.
+            window: ``"full"`` for the whole slide, or ``((x, y), (w, h))`` in level-0
+                coordinates.
+
+        Returns:
+            The origin and the size.
         """
 
-        self.window = window
-        if self.window == "full":
-            self.window = (0, 0), self.original_size
-        self.x, self.y = self.window[0]
-        self.w, self.h = self.window[1]
-        self.region = self.wsi_obj.read_region(self.window[0], self.window[1])
+        if isinstance(window, str):
+            if window != "full":
+                raise ValueError(f"The only accepted window keyword is 'full', got '{window}'.")
+            return (0.0, 0.0), (float(self.dimensions[0]), float(self.dimensions[1]))
 
-    @abstractmethod
-    def plot_slide(self) -> None:
-        """Abstract method to plot histological slide."""
-        pass
+        (x, y), (w, h) = window
+        x, y = max(0.0, float(x)), max(0.0, float(y))
+        w = min(float(w), self.dimensions[0] - x)
+        h = min(float(h), self.dimensions[1] - y)
+        if w <= 0 or h <= 0:
+            raise ValueError(f"The window {window} does not intersect the slide {self.dimensions}.")
 
-    @abstractmethod
-    def plot_seg(self) -> None:
-        """Abstract method to plot segmentation overlays."""
-        pass
+        return (x, y), (w, h)
 
+    def read(self, window: Window = "full", max_pixels: int = DEFAULT_MAX_PIXELS) -> Region:
+        """
+        Reads a region of the slide, downsampling it if it would otherwise be too large.
 
-class StdVisualizer(SlideVisualizer):
+        Args:
+            window: ``"full"`` or ``((x, y), (w, h))`` in level-0 coordinates.
+            max_pixels: Cap on the longest side of the returned image. The region is read
+                from the best pyramid level, then resized if that is still not enough.
+
+        Returns:
+            The region, carrying the downsample that was applied.
+        """
+
+        origin, size = self._resolve_window(window)
+        target_downsample = max(1.0, max(size) / float(max_pixels))
+
+        if window == "full" and int(max_pixels) in self._thumbnails:
+            return self._thumbnails[int(max_pixels)]
+
+        level = self.slide.get_best_level_for_downsample(target_downsample)
+        level_downsample = float(self.slide.level_downsamples[level])
+
+        level_origin = (int(round(origin[0])), int(round(origin[1])))
+        level_size = (
+            max(1, int(round(size[0] / level_downsample))),
+            max(1, int(round(size[1] / level_downsample))),
+        )
+
+        if level_size[0] * level_size[1] > 4 * max_pixels * max_pixels:
+            # Even the coarsest level is too big to hold at once: read it in tiles.
+            image = self._read_tiled(level, level_origin, level_size, max_pixels)
+            downsample = max(size) / max(image.shape[1], image.shape[0])
+        else:
+            tile = self.slide.read_region(level_origin, level, level_size).convert("RGB")
+            scale = max(1.0, max(level_size) / float(max_pixels))
+            if scale > 1.0:
+                tile = tile.resize(
+                    (max(1, int(level_size[0] / scale)), max(1, int(level_size[1] / scale))), Image.BILINEAR
+                )
+            image = np.asarray(tile)
+            downsample = size[0] / image.shape[1]
+
+        region = Region(image, origin, size, downsample)
+        if window == "full":
+            self._thumbnails[int(max_pixels)] = region
+
+        return region
+
+    def _read_tiled(
+        self,
+        level: int,
+        level_origin: Tuple[int, int],
+        level_size: Tuple[int, int],
+        max_pixels: int,
+    ) -> np.ndarray:
+        """
+        Reads a region tile by tile and downsamples each tile, to bound memory use.
+
+        Args:
+            level: Pyramid level to read from.
+            level_origin: Top-left corner, in level-0 coordinates.
+            level_size: Size to read, in pixels of ``level``.
+            max_pixels: Cap on the longest side of the result.
+
+        Returns:
+            The assembled, downsampled image.
+        """
+
+        level_downsample = float(self.slide.level_downsamples[level])
+        scale = max(1.0, max(level_size) / float(max_pixels))
+        out_size = (max(1, int(level_size[0] / scale)), max(1, int(level_size[1] / scale)))
+        logger.info(
+            f"Reading {level_size[0]}x{level_size[1]} px in tiles from level {level} "
+            f"and downsampling to {out_size[0]}x{out_size[1]}."
+        )
+
+        canvas = Image.new("RGB", out_size)
+        n_cols = math.ceil(level_size[0] / READ_TILE)
+        n_rows = math.ceil(level_size[1] / READ_TILE)
+
+        for row in range(n_rows):
+            for col in range(n_cols):
+                x = col * READ_TILE
+                y = row * READ_TILE
+                w = min(READ_TILE, level_size[0] - x)
+                h = min(READ_TILE, level_size[1] - y)
+
+                location = (
+                    int(round(level_origin[0] + x * level_downsample)),
+                    int(round(level_origin[1] + y * level_downsample)),
+                )
+                tile = self.slide.read_region(location, level, (w, h)).convert("RGB")
+
+                out_x, out_y = int(x / scale), int(y / scale)
+                out_w = max(1, min(int(round(w / scale)), out_size[0] - out_x))
+                out_h = max(1, min(int(round(h / scale)), out_size[1] - out_y))
+                canvas.paste(tile.resize((out_w, out_h), Image.BILINEAR), (out_x, out_y))
+
+        return np.asarray(canvas)
+
+    def thumbnail(self, max_pixels: int = DEFAULT_MAX_PIXELS) -> Region:
+        """
+        Returns a whole-slide overview, computed once and cached.
+
+        Args:
+            max_pixels: Cap on the longest side.
+
+        Returns:
+            The region covering the whole slide.
+        """
+
+        return self.read("full", max_pixels=max_pixels)
+
+    # ------------------------------------------------------------------ overlays
+
+    def _cells_in(self, region: Region) -> np.ndarray:
+        """
+        Indices of the nuclei whose centroid falls in a region, with a small margin so
+        nuclei straddling the border are kept.
+
+        Args:
+            region: The region of interest.
+
+        Returns:
+            An array of indices into ``cell_ids``.
+        """
+
+        if not len(self.centroids):
+            return np.empty(0, dtype=int)
+
+        return np.flatnonzero(region.contains(self.centroids, margin=50.0))
+
+    def _draw_contours(
+        self,
+        region: Region,
+        indices: np.ndarray,
+        types: Sequence[str],
+        thickness: int = 2,
+        filled: Optional[Sequence[str]] = None,
+        draw_dot: bool = False,
+        on_white: bool = False,
+    ) -> np.ndarray:
+        """
+        Draws nucleus contours onto a copy of the region's pixels.
+
+        Args:
+            region: The region to draw on.
+            indices: Indices of the nuclei to draw.
+            types: Cell type of every nucleus, in segmentation order.
+            thickness: Contour line thickness.
+            filled: Cell types to fill rather than outline.
+            draw_dot: Whether to mark centroids with a dot.
+            on_white: Whether to draw on a white background instead of the tissue.
+
+        Returns:
+            The overlay image.
+        """
+
+        overlay = np.full_like(region.image, 255) if on_white else region.image.copy()
+        palette = self.palette or Palette(sorted({str(t) for t in types}))
+        filled_set = set(filled or ())
+
+        for index in indices:
+            contour = region.to_local(self._contours[index])
+            contour = np.round(contour).astype(np.int32).reshape(-1, 1, 2)
+            cell_type = types[index]
+            color = tuple(int(c) for c in palette.rgb255(cell_type))
+
+            if cell_type in filled_set:
+                cv2.drawContours(overlay, [contour], -1, color, -1)
+            else:
+                cv2.drawContours(overlay, [contour], -1, color, thickness)
+
+            if draw_dot:
+                centroid = region.to_local(self.centroids[index : index + 1])[0]
+                cv2.circle(overlay, (int(centroid[0]), int(centroid[1])), 3, color, -1)
+
+        return overlay
+
+    def _add_spots(
+        self,
+        ax: plt.Axes,
+        region: Region,
+        spot_prop_df: Optional[pd.DataFrame] = None,
+        color: str = "black",
+        linewidth: float = 1.5,
+    ) -> None:
+        """
+        Draws the spots on an axis, as circles or as pie charts of their proportions.
+
+        Args:
+            ax: Axis to draw on, in region-local pixel coordinates.
+            region: The region being shown.
+            spot_prop_df: Proportions per spot. When given, each spot becomes a pie chart.
+            color: Colour of the circles.
+            linewidth: Width of the circles.
+        """
+
+        if self.spots is None:
+            logger.warning("No AnnData object was given, so there are no spots to draw.")
+            return
+
+        radius = self.spots.diameter / 2.0
+        inside = region.contains(self.spots.centers, margin=radius)
+        centers_local = region.to_local(self.spots.centers)
+        radius_local = radius / region.downsample
+
+        # The pies are coloured by the cell types of spot_prop_df, which are not necessarily
+        # the ones this visualizer draws nuclei with (they may be HoVer-Net class indices).
+        pie_palette = self.palette
+        if spot_prop_df is not None and (
+            pie_palette is None or not all(column in pie_palette for column in spot_prop_df.columns)
+        ):
+            pie_palette = Palette(list(spot_prop_df.columns))
+
+        for index in np.flatnonzero(inside):
+            spot_id = self.spots.ids[index]
+            x, y = centers_local[index]
+
+            if spot_prop_df is not None and spot_id in spot_prop_df.index:
+                proportions = spot_prop_df.loc[spot_id]
+                proportions = proportions[proportions > 0]
+                if proportions.empty:
+                    continue
+                # A nested axis, placed in figure coordinates, is the only way to put a
+                # real pie chart at a data position.
+                center_display = ax.transData.transform((x, y))
+                edge_display = ax.transData.transform((x + radius_local, y))
+                radius_display = abs(edge_display[0] - center_display[0])
+                figure = ax.figure
+                width = 2 * radius_display / figure.bbox.width
+                height = 2 * radius_display / figure.bbox.height
+                pie_ax = figure.add_axes(
+                    [
+                        (center_display[0] - radius_display) / figure.bbox.width,
+                        (center_display[1] - radius_display) / figure.bbox.height,
+                        width,
+                        height,
+                    ]
+                )
+                pie_ax.pie(proportions.values, colors=pie_palette.color_list(list(proportions.index)), startangle=90)
+                pie_ax.set_aspect("equal")
+                pie_ax.axis("off")
+            else:
+                ax.add_patch(plt.Circle((x, y), radius_local, color=color, fill=False, linewidth=linewidth))
+
+    # ------------------------------------------------------------------ plotting
+
     def plot_slide(
         self,
-        window: Union[str, Tuple[Tuple[int, int], Tuple[int, int]]],
+        window: Window = "full",
+        show_spots: bool = False,
         spot_prop_df: Optional[pd.DataFrame] = None,
-        show_visium: bool = False,
+        max_pixels: int = DEFAULT_MAX_PIXELS,
         title: Optional[str] = None,
-        display: bool = True,
-        figsize: Tuple[int, int] = (15, 15),
-    ) -> Optional[plt.Figure]:
+        figsize: Tuple[float, float] = (11.0, 11.0),
+        savefig: Optional[str] = None,
+    ) -> Figure:
         """
-        Plots the histological slide with an optional overlay of Visium spots.
+        Plots the tissue, optionally with the spots on top.
 
         Args:
-            window: Region of the slide to plot. "full" for the entire slide.
-            spot_prop_df: DataFrame containing proportions for each Visium spot.
-            show_visium: Whether to overlay Visium spots.
-            title: Optional title for the plot.
-            display: Whether to display the plot or return the figure.
-            figsize: Size of the plot.
+            window: ``"full"`` or ``((x, y), (w, h))`` in level-0 coordinates.
+            show_spots: Whether to draw the spots.
+            spot_prop_df: Proportions per spot; each spot is then drawn as a pie chart.
+            max_pixels: Cap on the longest side of the region that is read.
+            title: Optional title.
+            figsize: Figure size.
+            savefig: Path to write the figure to.
 
         Returns:
-            The plotted figure if display is False.
+            The figure.
         """
 
-        self._set_window(window)
-
-        if show_visium and spot_prop_df is not None:
-            if self.w != self.h:
-                print("Warning: The selected window is not square. Pie chart placement may be inaccurate.")
-
-        if not show_visium and spot_prop_df is not None:
-            print(
-                "Warning: You provided a spot_prop_df but did not enable Visium spot drawing (show_visium=False).",
-                "No pie charts will be plotted.",
-            )
-            spot_prop_df = None  # Prevent drawing if not allowed
+        region = self.read(window, max_pixels=max_pixels)
 
         fig, ax = plt.subplots(figsize=figsize)
-        ax.imshow(self.region)
-
-        if show_visium:
-            self._add_visium(ax=ax, spot_prop_df=spot_prop_df)
-
+        ax.imshow(region.image)
+        if show_spots or spot_prop_df is not None:
+            self._add_spots(ax, region, spot_prop_df=spot_prop_df)
         ax.axis("off")
-        ax.set_title([f"Slide - {self.adata_name}", title][title is not None])
+        ax.set_title(title if title is not None else self._default_title(region), fontsize=11)
 
-        if display:
-            plt.show()
-            return None
-        else:
-            plt.close(fig)
-            return fig
+        # The pies are inset axes, which tight_layout cannot place; it has nothing to do
+        # here anyway, the figure being one image with its axis off.
+        return close(fig, savefig, tight=spot_prop_df is None)
 
     def plot_seg(
         self,
-        window: Union[str, Tuple[Tuple[int, int], Tuple[int, int]]],
+        window: Window = "full",
+        show_spots: bool = False,
         draw_dot: bool = False,
-        show_visium: bool = False,
+        thickness: int = 2,
+        filled: bool = False,
+        legend: bool = True,
+        max_pixels: int = DEFAULT_MAX_PIXELS,
         title: Optional[str] = None,
-        display: bool = True,
-        figsize: Tuple[int, int] = (18, 15),
-    ) -> Optional[Any]:
+        figsize: Tuple[float, float] = (11.0, 11.0),
+        savefig: Optional[str] = None,
+    ) -> Figure:
         """
-        Adds segmentation contours to the slide.
+        Plots the tissue with the nucleus contours on top, coloured by cell type when
+        labels are attached.
+
+        For a window so large that a nucleus covers barely a pixel, contours cannot be
+        seen; :meth:`plot_celltype_map` is the right call there, and a warning says so.
 
         Args:
-            window: The (x, y, width, height) of the region to display. "full" for the entire slide.
-            draw_dot: Whether to draw centroids as dots.
-            show_visium: Whether to overlay Visium spots.
-            title: Optional title for the plot.
-            display: Whether to display the plot. If False, returns the figure object.
-            figsize: Size of the figure.
+            window: ``"full"`` or ``((x, y), (w, h))`` in level-0 coordinates.
+            show_spots: Whether to draw the spots.
+            draw_dot: Whether to mark centroids with a dot.
+            thickness: Contour line thickness.
+            filled: Whether to fill the nuclei instead of outlining them.
+            legend: Whether to add a cell-type legend.
+            max_pixels: Cap on the longest side of the region that is read.
+            title: Optional title.
+            figsize: Figure size.
+            savefig: Path to write the figure to.
 
         Returns:
-            The matplotlib figure object if display is False, otherwise None.
+            The figure.
         """
 
-        self._set_window(window)
+        if self.seg_dict is None:
+            raise ValueError("No segmentation was given: pass seg=... to SlideVisualizer.")
 
-        if show_visium and (self.spots_center is None or self.spots_diameter is None):
-            print("Warning : You cannot plot Visium spots without Visium data.")
-            show_visium = False
+        region = self.read(window, max_pixels=max_pixels)
+        if region.downsample > 30.0 / MIN_PIXELS_PER_NUCLEUS:
+            logger.warning(
+                f"At a downsample of {region.downsample:.0f} a nucleus is about "
+                f"{30.0 / region.downsample:.1f} px wide; plot_celltype_map() is easier to read."
+            )
 
-        if self.data is None:
-            raise ValueError("You must create a SlideVisualizer object with segmentation info to apply add_seg()")
-
-        tile_info_dict = {}
-        for idx, cnt in enumerate(self.contour_list_wsi):
-            cnt_tmp = np.array(cnt)
-            cnt_tmp = cnt_tmp[
-                (cnt_tmp[:, 0] >= self.x)
-                & (cnt_tmp[:, 0] <= self.x + self.w)
-                & (cnt_tmp[:, 1] >= self.y)
-                & (cnt_tmp[:, 1] <= self.y + self.h)
-            ]
-            label = str(self.type_list_wsi[idx])
-            centroid_x = self.centroid_list_wsi[idx][0] - self.x
-            centroid_y = self.centroid_list_wsi[idx][1] - self.y
-            if cnt_tmp.shape[0] > 0:
-                cnt_adj = np.round(cnt_tmp - np.array([self.x, self.y])).astype("int")
-                tile_info_dict[idx] = {"contour": cnt_adj, "type": label, "centroid": [centroid_x, centroid_y]}
-
-        self.overlaid_output = self._visualize_instances_dict(
-            self.region, tile_info_dict, color_dict=self.color_dict, draw_dot=draw_dot
+        indices = self._cells_in(region)
+        types = self.cell_types()
+        overlay = self._draw_contours(
+            region,
+            indices,
+            types,
+            thickness=thickness,
+            filled=list(self.palette.names) if (filled and self.palette) else None,
+            draw_dot=draw_dot,
         )
 
         fig, ax = plt.subplots(figsize=figsize)
-        ax.imshow(self.overlaid_output)
-
-        if show_visium:
-            self._add_visium()
-
+        ax.imshow(overlay)
+        if show_spots:
+            self._add_spots(ax, region)
         ax.axis("off")
-        ax.set_title([f"Segmentation overlay - {self.adata_name}", title][title is not None])
+        ax.set_title(
+            title if title is not None else f"{self._default_title(region)} — {len(indices)} nuclei", fontsize=11
+        )
 
-        if display:
-            plt.show()
-            return None
-        else:
-            plt.close(fig)
-            return fig
+        if legend and self.palette is not None:
+            shown = sorted({types[i] for i in indices})
+            handles, labels = self.palette.legend_handles([ct for ct in self.palette.names if ct in shown])
+            if handles:
+                ax.legend(
+                    handles,
+                    labels,
+                    loc="center left",
+                    bbox_to_anchor=(1.01, 0.5),
+                    fontsize=9,
+                    frameon=False,
+                    handletextpad=0.6,
+                    labelspacing=0.8,
+                )
+
+        return close(fig, savefig)
 
     def plot_seg_overlays(
         self,
-        window: Union[str, Tuple[Tuple[int, int], Tuple[int, int]]],
-        draw_dot: bool = False,
-        figsize: Tuple[int, int] = (20, 12),
+        window: Window = "full",
+        cell_types: Optional[Sequence[str]] = None,
         max_cols: int = 4,
-        display: bool = True,
-        separated: bool = True,
-        fontsize_separated: int = 25,
+        draw_dot: bool = False,
+        thickness: int = 2,
         scale_cells: float = 1.0,
-    ) -> Optional[plt.Figure]:
+        on_white: bool = True,
+        max_pixels: int = DEFAULT_MAX_PIXELS,
+        panel_size: Tuple[float, float] = (5.0, 5.0),
+        savefig: Optional[str] = None,
+    ) -> Figure:
         """
-        Plots segmentation overlays.
+        One panel per cell type, each highlighting that type and greying out the rest.
 
         Args:
-            window: Viewing window for all plots.
-            draw_dot: Whether to draw centroids as dots.
-            figsize: Size of the figure.
-            max_cols: Max number of columns (for separated view).
-            display: Whether to display the plot.
-            separated: If True, make a mosaic; if False, combine all types in one panel.
-            scale_cells: Scaling factor for cell size (1.0 = normal, >1 = bigger cells, <1 = smaller).
+            window: ``"full"`` or ``((x, y), (w, h))`` in level-0 coordinates.
+            cell_types: Cell types to show. Defaults to those present in the window.
+            max_cols: Maximum number of columns.
+            draw_dot: Whether to mark centroids with a dot.
+            thickness: Contour line thickness.
+            scale_cells: Scales the contours around their centroid, to make small nuclei
+                visible in a large window.
+            on_white: Whether to draw on white instead of the tissue.
+            max_pixels: Cap on the longest side of the region that is read.
+            panel_size: Size of one panel, in inches.
+            savefig: Path to write the figure to.
 
         Returns:
-            The figure object.
+            The figure.
         """
 
-        self._set_window(window)
+        if self.seg_dict is None:
+            raise ValueError("No segmentation was given: pass seg=... to SlideVisualizer.")
 
-        if self.data is None:
-            raise ValueError("Segmentation data not found.")
+        region = self.read(window, max_pixels=max_pixels)
+        indices = self._cells_in(region)
+        types = self.cell_types()
+        present = sorted({types[i] for i in indices})
+        shown = [ct for ct in (cell_types if cell_types is not None else present) if ct in present]
 
-        # Build the instance dict for this window
-        tile_info_dict = {}
-        for idx, cnt in enumerate(self.contour_list_wsi):
-            cnt_tmp = np.array(cnt)
-            cnt_tmp = cnt_tmp[
-                (cnt_tmp[:, 0] >= self.x)
-                & (cnt_tmp[:, 0] <= self.x + self.w)
-                & (cnt_tmp[:, 1] >= self.y)
-                & (cnt_tmp[:, 1] <= self.y + self.h)
-            ]
-            label = str(self.type_list_wsi[idx])
-            centroid_x = self.centroid_list_wsi[idx][0] - self.x
-            centroid_y = self.centroid_list_wsi[idx][1] - self.y
+        if not shown:
+            raise ValueError("None of the requested cell types is present in this window.")
 
-            if cnt_tmp.shape[0] > 0:
-                cnt_adj = np.round(cnt_tmp - np.array([self.x, self.y])).astype("int")
-
-                # --- NEW: scale contours around centroid ---
-                if scale_cells != 1.0:
-                    centroid = np.array([centroid_x, centroid_y])
-                    cnt_adj = ((cnt_adj - centroid) * scale_cells + centroid).astype("int")
-
-                tile_info_dict[idx] = {
-                    "contour": cnt_adj,
-                    "type": label,
-                    "centroid": [centroid_x, centroid_y],
-                }
-
-        if separated:
-            # same mosaic code as before ...
-            unique_types = sorted({inst["type"] for inst in tile_info_dict.values()})
-            n_types = len(unique_types)
-            n_cols = min(n_types, max_cols)
-            n_rows = math.ceil(n_types / n_cols)
-
-            fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize)
-            axes = axes.flatten()
-
-            for i, cell_type in enumerate(unique_types):
-                ax = axes[i]
-                custom_color_dict = {}
-                for k, v in self.color_dict.items():
-                    if k == cell_type:
-                        custom_color_dict[k] = v
-                    else:
-                        custom_color_dict[k] = ("Other", (160, 160, 160))
-
-                overlay = self._visualize_instances_dict(
-                    input_image=np.ones_like(self.region) * 255,
-                    inst_dict=tile_info_dict,
-                    draw_dot=draw_dot,
-                    color_dict=custom_color_dict,
-                    line_thickness=2,
-                    filled_types=[cell_type],
-                )
-
-                ax.imshow(overlay)
-                ax.set_title(self.color_dict[cell_type][0], fontsize=fontsize_separated)
-                ax.axis("off")
-
-            for j in range(i + 1, len(axes)):
-                axes[j].axis("off")
-
-            fig.tight_layout()
-
-        else:
-            # All types together
-            fig, ax = plt.subplots(figsize=figsize)
-            overlay = self._visualize_instances_dict(
-                input_image=np.ones_like(self.region) * 255,
-                inst_dict=tile_info_dict,
-                draw_dot=draw_dot,
-                color_dict=self.color_dict,
-                line_thickness=2,
-                filled_types=list(self.color_dict.keys()),
-            )
-            ax.imshow(overlay)
+        n_cols = min(len(shown), max_cols)
+        n_rows = math.ceil(len(shown) / n_cols)
+        fig, axes = plt.subplots(
+            n_rows, n_cols, figsize=(n_cols * panel_size[0], n_rows * panel_size[1]), squeeze=False
+        )
+        for ax in axes.flat:
             ax.axis("off")
 
-        if display:
-            plt.show()
-            return None
-        else:
-            plt.close(fig)
-            return fig
+        scaled_contours = None
+        if scale_cells != 1.0:
+            scaled_contours = self._contours
+            self._contours = [
+                (contour - self.centroids[i]) * scale_cells + self.centroids[i]
+                for i, contour in enumerate(self._contours)
+            ]
+
+        try:
+            for position, cell_type in enumerate(shown):
+                ax = axes.flat[position]
+                selection = np.array([i for i in indices if types[i] == cell_type], dtype=int)
+                others = np.array([i for i in indices if types[i] != cell_type], dtype=int)
+
+                overlay = np.full_like(region.image, 255) if on_white else region.image.copy()
+                base = Region(overlay, region.origin, region.size, region.downsample)
+                if len(others):
+                    grey = [OTHER_LABEL] * len(types)
+                    overlay = self._draw_contours(base, others, grey, thickness=1, on_white=False)
+                    base = Region(overlay, region.origin, region.size, region.downsample)
+                if len(selection):
+                    overlay = self._draw_contours(
+                        base, selection, types, thickness=thickness, filled=[cell_type], draw_dot=draw_dot
+                    )
+
+                ax.imshow(overlay)
+                ax.set_title(f"{cell_type} ({len(selection)})", fontsize=13)
+        finally:
+            if scaled_contours is not None:
+                self._contours = scaled_contours
+
+        return close(fig, savefig)
+
+    def plot_celltype_map(
+        self,
+        window: Window = "full",
+        background: bool = True,
+        point_size: Optional[float] = None,
+        alpha: float = 0.9,
+        cell_types: Optional[Sequence[str]] = None,
+        max_pixels: int = DEFAULT_MAX_PIXELS,
+        title: Optional[str] = None,
+        figsize: Tuple[float, float] = (12.0, 12.0),
+        savefig: Optional[str] = None,
+    ) -> Figure:
+        """
+        Every cell as a coloured dot at its position: the readable way to see cell types
+        over a whole slide.
+
+        Args:
+            window: ``"full"`` or ``((x, y), (w, h))`` in level-0 coordinates.
+            background: Whether to draw the tissue underneath.
+            point_size: Marker size. Chosen from the cell density when not given.
+            alpha: Marker transparency.
+            cell_types: Restricts the map to these cell types.
+            max_pixels: Cap on the longest side of the background image.
+            title: Optional title.
+            figsize: Figure size.
+            savefig: Path to write the figure to.
+
+        Returns:
+            The figure.
+        """
+
+        if not len(self.centroids):
+            raise ValueError("No segmentation was given: pass seg=... to SlideVisualizer.")
+
+        region = self.read(window, max_pixels=max_pixels)
+        indices = self._cells_in(region)
+        types = np.asarray(self.cell_types())
+
+        if cell_types is not None:
+            keep = np.isin(types[indices], list(cell_types))
+            indices = indices[keep]
+
+        if point_size is None:
+            # Aim for markers that touch but do not merge: the area of the view divided by
+            # the number of cells gives the pixel budget of one cell.
+            per_cell = (region.image.shape[0] * region.image.shape[1]) / max(len(indices), 1)
+            point_size = float(np.clip(per_cell / 12.0, 0.4, 24.0))
+
+        palette = self.palette or Palette(sorted(set(types.tolist())))
+
+        return plot_celltype_points(
+            coordinates=region.to_local(self.centroids[indices]),
+            labels=types[indices],
+            palette=palette,
+            background=region.image if background else None,
+            extent=(0, region.image.shape[1], region.image.shape[0], 0) if background else None,
+            point_size=point_size,
+            alpha=alpha,
+            title=title if title is not None else f"{self._default_title(region)} — {len(indices)} cells",
+            figsize=figsize,
+            savefig=savefig,
+        )
+
+    def plot_spot(
+        self,
+        spot_id: Optional[str] = None,
+        margin: float = 40.0,
+        draw_seg: Optional[bool] = None,
+        spot_prop_df: Optional[pd.DataFrame] = None,
+        title: Optional[str] = None,
+        legend: bool = True,
+        figsize: Tuple[float, float] = (7.0, 7.0),
+        savefig: Optional[str] = None,
+    ) -> Figure:
+        """
+        Zooms on one spot, with its outline and, when available, the segmentation.
+
+        Args:
+            spot_id: The spot to show. A random one is picked when None.
+            margin: Extra pixels around the spot.
+            draw_seg: Whether to draw the nuclei. Defaults to True when a segmentation is
+                loaded.
+            spot_prop_df: Proportions per spot; the spot is then drawn as a pie chart.
+            title: Title of the panel. Pass an empty string for none.
+            legend: Whether to add a cell-type legend.
+            figsize: Figure size.
+            savefig: Path to write the figure to.
+
+        Returns:
+            The figure.
+        """
+
+        if self.spots is None:
+            raise ValueError("No AnnData object was given: pass adata=... to SlideVisualizer.")
+
+        if spot_id is None:
+            spot_id = str(np.random.choice(self.spots.ids))
+            logger.info(f"Randomly selected spot {spot_id}.")
+        if spot_id not in self.spots.ids:
+            raise ValueError(f"Spot {spot_id} is not in this AnnData object.")
+
+        index = self.spots.ids.index(spot_id)
+        center = self.spots.centers[index]
+        side = self.spots.diameter + 2 * margin
+        window = ((center[0] - side / 2, center[1] - side / 2), (side, side))
+
+        if draw_seg is None:
+            draw_seg = self.seg_dict is not None
+
+        if title is None:
+            title = f"spot {spot_id}"
+        if draw_seg:
+            return self.plot_seg(
+                window,
+                show_spots=spot_prop_df is None,
+                max_pixels=int(side),
+                title=title,
+                legend=legend,
+                figsize=figsize,
+                savefig=savefig,
+            )
+
+        return self.plot_slide(
+            window,
+            show_spots=True,
+            spot_prop_df=spot_prop_df,
+            max_pixels=int(side),
+            title=title,
+            figsize=figsize,
+            savefig=savefig,
+        )
 
     def plot_delaunay_graph(
         self,
-        window: Union[str, Tuple[Tuple[int, int], Tuple[int, int]]] = "full",
+        window: Window = "full",
         max_distance: Optional[float] = None,
-        linewidth: float = 0.5,
-        display: bool = True,
-        figsize: Tuple[int, int] = (18, 15),
-    ) -> Optional[plt.Figure]:
+        linewidth: float = 0.4,
+        color: str = "red",
+        max_pixels: int = DEFAULT_MAX_PIXELS,
+        figsize: Tuple[float, float] = (11.0, 11.0),
+        savefig: Optional[str] = None,
+    ) -> Figure:
         """
-        Plots the Delaunay triangulation graph of nuclei centroids within a specified window.
+        Plots the Delaunay graph of the nuclei of a window, over the tissue.
 
         Args:
-            window: The (x, y, width, height) of the region to display. "full" for the entire slide.
-            max_distance: Maximum distance between points to draw an edge. If None, all edges are drawn.
-            linewidth: Line width for the edges.
-            display: Whether to display the plot. If False, returns the figure object.
-            figsize: Size of the figure.
+            window: ``"full"`` or ``((x, y), (w, h))`` in level-0 coordinates.
+            max_distance: Drops edges longer than this, in level-0 pixels.
+            linewidth: Width of the edges.
+            color: Colour of the edges.
+            max_pixels: Cap on the longest side of the region that is read.
+            figsize: Figure size.
+            savefig: Path to write the figure to.
 
         Returns:
-            The matplotlib figure object if display is False, otherwise None.
+            The figure.
         """
 
-        self._set_window(window)
-        nuc_dict = self.data["nuc"]
+        if not len(self.centroids):
+            raise ValueError("No segmentation was given: pass seg=... to SlideVisualizer.")
 
-        # filter centroids inside the current window
-        coords = []
-        for v in nuc_dict.values():
-            cx, cy = v["centroid"]
-            if self.x <= cx <= self.x + self.w and self.y <= cy <= self.y + self.h:
-                coords.append([cx, cy])
-        coords = np.array(coords)
+        region = self.read(window, max_pixels=max_pixels)
+        indices = self._cells_in(region)
+        if len(indices) < 3:
+            raise ValueError(f"Only {len(indices)} nuclei in this window: not enough for a triangulation.")
 
-        if len(coords) < 3:
-            print("Not enough points in this window for Delaunay triangulation.")
-            return None
+        coordinates = self.centroids[indices]
+        local = region.to_local(coordinates)
+        triangulation = Delaunay(coordinates)
 
-        # compute Delaunay only on visible coords
-        tri = Delaunay(coords)
-
-        fig, ax = plt.subplots(figsize=figsize)
-        ax.imshow(self.region)
-
-        for simplex in tri.simplices:
+        segments = set()
+        for simplex in triangulation.simplices:
             for i in range(3):
                 a, b = simplex[i], simplex[(i + 1) % 3]
-                pa, pb = coords[a], coords[b]
-
-                if max_distance is not None:
-                    if np.linalg.norm(pa - pb) > max_distance:
-                        continue
-
-                ax.plot(
-                    [pa[0] - self.x, pb[0] - self.x],
-                    [pa[1] - self.y, pb[1] - self.y],
-                    color="red",
-                    linewidth=linewidth,
-                    alpha=0.6,
-                )
-
-        ax.axis("off")
-        if display:
-            plt.show()
-        else:
-            plt.close(fig)
-            return fig
-
-    def _add_visium(self, ax: Optional[plt.Axes] = None, spot_prop_df: Optional[pd.DataFrame] = None) -> None:
-        """
-        Adds Visium spots to the plot.
-
-        Args:
-            ax: Matplotlib Axes object to add spots to. If None, uses current axes.
-            spot_prop_df: DataFrame containing spot properties for coloring.
-        """
-
-        if ax is None:
-            ax = plt.gca()
-
-        ext_vis = self.spots_diameter / 2
-        spot_ids = self.adata.obs.index
-
-        if spot_prop_df is not None:
-            colors = [value[1] for value in self.color_dict.values() if value[0] in spot_prop_df.columns]
-            colors = [tuple(channel / 255 for channel in rgba) for rgba in colors]
-
-        for i, spot in enumerate(self.spots_center):
-            spot_id = spot_ids[i]
-            spot_x = spot[0] - self.x
-            spot_y = spot[1] - self.y
-
-            if spot_prop_df is not None and spot_id in spot_prop_df.index:
-                if ext_vis <= spot_x <= self.w - ext_vis and ext_vis <= spot_y <= self.h - ext_vis:
-                    proportions = spot_prop_df.loc[spot_id].values
-
-                    # Convert center to display coordinates
-                    center_disp = ax.transData.transform((spot_x, spot_y))
-                    radius_disp = ax.transData.transform((spot_x + ext_vis, spot_y))[0] - center_disp[0]
-
-                    # Normalize to figure coords
-                    fig = ax.figure
-                    fig_width, fig_height = fig.bbox.width, fig.bbox.height
-
-                    x0 = (center_disp[0] - radius_disp) / fig_width
-                    y0 = (center_disp[1] - radius_disp) / fig_height
-                    width = (2 * radius_disp) / fig_width
-                    height = (2 * radius_disp) / fig_height
-
-                    pie_ax = fig.add_axes([x0, y0, width, height])
-                    pie_ax.pie(proportions, startangle=90, colors=colors)
-                    pie_ax.set_aspect("equal")
-                    pie_ax.axis("off")
-            else:
-                # Draw black circle (existing rule)
-                if -ext_vis <= spot_x <= self.w + ext_vis and -ext_vis <= spot_y <= self.h + ext_vis:
-                    circle = plt.Circle((spot_x, spot_y), ext_vis, color="black", fill=False, linewidth=3)
-                    ax.add_patch(circle)
-
-    def _visualize_instances_dict(
-        self,
-        input_image: np.ndarray,
-        inst_dict: Dict[int, Dict[str, Any]],
-        draw_dot: bool = False,
-        color_dict: Optional[Dict[str, Tuple[str, Tuple[int, int, int]]]] = None,
-        line_thickness: int = 2,
-        filled_types: Optional[List[str]] = None,
-    ) -> np.ndarray:
-        """
-        Overlays segmentation results (dictionary) on the image as contours. Adapted from Hovernet.
-
-        Args:
-            input_image: Input image array.
-            inst_dict: Dictionary containing segmentation instance data.
-            draw_dot: Whether to draw centroids as dots.
-            color_dict: Dictionary mapping type IDs to (name, color).
-            line_thickness: Thickness of contour lines.
-            filled_types: List of types to fill in color instead of just contouring.
-
-        Returns:
-            Image with overlaid segmentation contours.
-        """
-
-        overlay = np.copy((input_image))
-
-        for _, [_, inst_info] in enumerate(inst_dict.items()):
-            inst_contour = inst_info["contour"]
-            inst_colour = color_dict[inst_info["type"]][1]
-            if filled_types is not None and inst_info["type"] in filled_types:
-                cv2.drawContours(overlay, [inst_contour], -1, inst_colour, -1)
-            else:
-                cv2.drawContours(overlay, [inst_contour], -1, inst_colour, line_thickness)
-
-            if draw_dot:
-                inst_centroid = inst_info["centroid"]
-                inst_centroid = tuple([int(v) for v in inst_centroid])
-                overlay = cv2.circle(overlay, inst_centroid, 3, inst_colour, -1)
-        return overlay
-
-
-class IntVisualizer(SlideVisualizer):
-    def plot_slide(
-        self,
-        window: Union[str, Tuple[Tuple[int, int], Tuple[int, int]]],
-        show_visium: bool = False,
-        title: Optional[str] = None,
-        display: bool = True,
-        figsize: Tuple[int, int] = (18, 15),
-    ) -> Optional[plt.Figure]:
-        """
-        Plots the histological slide with an optional overlay of Visium spots.
-
-        Args:
-            window: Region of the slide to plot. "full" for the entire slide.
-            show_visium: Whether to overlay Visium spots.
-            title: Optional title for the plot.
-            display: Whether to display the plot or return the figure.
-            figsize: Size of the plot.
-
-        Returns:
-            The plotted figure if display is False.
-        """
-
-        self._set_window(window)
-
-        if show_visium and (self.spots_center is None or self.spots_diameter is None):
-            print("Warning : You cannot plot Visium spots without Visium data.")
-            show_visium = False
+                segments.add((min(a, b), max(a, b)))
 
         fig, ax = plt.subplots(figsize=figsize)
-        ax.imshow(self.region)
+        ax.imshow(region.image)
 
-        if show_visium:
-            self._add_visium()
+        lines = []
+        for a, b in segments:
+            if max_distance is not None and np.linalg.norm(coordinates[a] - coordinates[b]) > max_distance:
+                continue
+            lines.append([local[a], local[b]])
+
+        if lines:
+            from matplotlib.collections import LineCollection
+
+            ax.add_collection(LineCollection(lines, colors=color, linewidths=linewidth, alpha=0.6))
 
         ax.axis("off")
-        ax.set_title([f"Slide - {self.adata_name}", title][title is not None])
+        ax.set_title(f"Delaunay graph — {len(indices)} nuclei, {len(lines)} edges", fontsize=11)
 
-        if display:
-            plt.show()
-            return None
-        else:
-            plt.close(fig)
-            return fig
+        return close(fig, savefig)
 
-    def plot_seg(
+    def plot_interactive(
         self,
-        window: Union[str, Tuple[Tuple[int, int], Tuple[int, int]]],
-        show_visium: bool = False,
-        line_width: int = 2,
-        title: Optional[str] = None,
-        display: bool = True,
-        figsize: Tuple[int, int] = (18, 15),
-    ) -> Optional[Any]:
+        window: Window = "full",
+        draw_seg: Optional[bool] = None,
+        show_spots: bool = False,
+        max_pixels: int = DEFAULT_MAX_PIXELS,
+        height: int = 800,
+    ) -> Any:
         """
-        Adds segmentation contours to the slide using Plotly.
+        The same view as :meth:`plot_seg`, as a zoomable plotly figure with the cell type
+        and cell id in the hover text.
 
         Args:
-            window: The (x, y, width, height) of the region to display. "full" for the entire slide.
-            show_visium: Whether to overlay Visium spots.
-            line_width: Line width for segmentation contours.
-            title: Optional title for the plot.
-            display: Whether to display the plot. If False, returns the figure object.
-            figsize: Size of the figure.
+            window: ``"full"`` or ``((x, y), (w, h))`` in level-0 coordinates.
+            draw_seg: Whether to draw the nuclei. Defaults to True when a segmentation is
+                loaded.
+            show_spots: Whether to draw the spots.
+            max_pixels: Cap on the longest side of the region that is read.
+            height: Height of the figure, in pixels.
 
         Returns:
-            The Plotly figure object if display is False, otherwise None.
+            A ``plotly.graph_objects.Figure``.
         """
 
-        self._set_window(window)
+        import plotly.graph_objects as go
 
-        if show_visium and (self.spots_center is None or self.spots_diameter is None):
-            print("Warning : You cannot plot Visium spots without Visium data.")
-            show_visium = False
+        region = self.read(window, max_pixels=max_pixels)
+        if draw_seg is None:
+            draw_seg = self.seg_dict is not None
 
-        if self.data is None:
-            raise ValueError("You must create a SlideVisualizer object with segmentation info to apply plot_seg()")
-
-        fig = make_subplots()
-        img_str = self._convert_array_to_base64(self.region)
-
-        # Add the slide image
-        fig.add_layout_image(
+        figure = go.Figure()
+        figure.add_layout_image(
             dict(
-                source=img_str,
+                source=_to_data_uri(region.image),
                 xref="x",
                 yref="y",
                 x=0,
-                y=self.region.shape[0],
-                sizex=self.region.shape[1],
-                sizey=self.region.shape[0],
+                y=0,
+                sizex=region.image.shape[1],
+                sizey=region.image.shape[0],
                 sizing="stretch",
                 layer="below",
             )
         )
 
-        # Plot each cell
-        for idx, cnt in enumerate(self.contour_list_wsi):
-            cnt_tmp = np.array(cnt)
-            cnt_tmp = cnt_tmp[
-                (cnt_tmp[:, 0] >= self.x)
-                & (cnt_tmp[:, 0] <= self.x + self.w)
-                & (cnt_tmp[:, 1] >= self.y)
-                & (cnt_tmp[:, 1] <= self.y + self.h)
-            ]
-            label = str(self.type_list_wsi[idx])
-            if cnt_tmp.shape[0] > 0:
-                cnt_adj = np.round(cnt_tmp - np.array([self.x, self.y])).astype("int")
-                color_rgb = self.color_dict[label][1]
-                color = f"rgb({color_rgb[0]}, {color_rgb[1]}, {color_rgb[2]})"
+        if draw_seg and len(self.centroids):
+            indices = self._cells_in(region)
+            types = np.asarray(self.cell_types())
+            local = region.to_local(self.centroids[indices])
+            palette = self.palette or Palette(sorted(set(types.tolist())))
 
-                cell_id = self.id_list_wsi[idx]
-                cell_type_name = self.color_dict[label][0]
-
-                fig.add_trace(
-                    go.Scatter(
-                        x=cnt_adj[:, 0],
-                        y=[self.region.shape[0] - y for y in cnt_adj[:, 1]],
-                        mode="lines",
-                        name=f"{cell_id}",
-                        hoverinfo="text",
-                        text=[f"cell_id: {cell_id}<br>type: {cell_type_name}"] * len(cnt_adj),
-                        line=dict(color=color, width=line_width),
+            for cell_type in sorted(set(types[indices].tolist())):
+                selection = types[indices] == cell_type
+                red, green, blue = palette.rgb255(cell_type)
+                figure.add_trace(
+                    go.Scattergl(
+                        x=local[selection, 0],
+                        y=local[selection, 1],
+                        mode="markers",
+                        marker=dict(size=5, color=f"rgb({red},{green},{blue})"),
+                        name=cell_type,
+                        text=[f"cell {self.cell_ids[i]}" for i in indices[selection]],
+                        hovertemplate="%{text}<br>" + cell_type + "<extra></extra>",
                     )
                 )
 
-        fig.update_xaxes(visible=False)
-        fig.update_yaxes(visible=False)
+        if show_spots and self.spots is not None:
+            radius = self.spots.diameter / 2.0
+            inside = region.contains(self.spots.centers, margin=radius)
+            centers = region.to_local(self.spots.centers[inside])
+            figure.add_trace(
+                go.Scattergl(
+                    x=centers[:, 0],
+                    y=centers[:, 1],
+                    mode="markers",
+                    marker=dict(
+                        size=2 * radius / region.downsample,
+                        color="rgba(0,0,0,0)",
+                        line=dict(color="black", width=1),
+                    ),
+                    name="spots",
+                    text=[self.spots.ids[i] for i in np.flatnonzero(inside)],
+                    hovertemplate="%{text}<extra></extra>",
+                )
+            )
 
-        fig.update_layout(
-            title=[f"Segmentation overlay - {self.adata_name}", title][title is not None],
-            title_x=0.5,
-            xaxis=dict(showgrid=False, zeroline=False),
-            yaxis=dict(showgrid=False, zeroline=False, scaleanchor="x", scaleratio=1),
-            width=figsize[0] * 80,
-            height=figsize[1] * 80,
-            hovermode="closest",
-            showlegend=False,
-            margin=dict(l=0, r=0, t=40, b=0),
+        figure.update_xaxes(range=[0, region.image.shape[1]], visible=False, constrain="domain")
+        figure.update_yaxes(
+            range=[region.image.shape[0], 0], visible=False, scaleanchor="x", scaleratio=1, constrain="domain"
+        )
+        figure.update_layout(
+            height=height, margin=dict(l=0, r=0, t=30, b=0), title=self._default_title(region), dragmode="pan"
         )
 
-        if show_visium:
-            self._add_visium(fig)
+        return figure
 
-        if display:
-            fig.show()
-            return None
-        else:
-            return fig
-
-    def _add_visium(self, fig: Optional[Any] = None) -> None:
+    def _default_title(self, region: Region) -> str:
         """
-        Adds Visium spots to the plot.
+        Builds a title saying what is being shown and at which resolution.
 
         Args:
-            fig: Optional Plotly figure object for visualization.
+            region: The region being shown.
         """
 
-        ext_vis = self.spots_diameter / 2
+        name = self.adata_name or self.slide_path.rsplit("/", 1)[-1]
+        if region.downsample > 1.2:
+            return f"{name} — {int(region.size[0])}x{int(region.size[1])} px at 1/{region.downsample:.0f}"
 
-        if fig is None:
-            for spot in self.spots_center:
-                spot_x = spot[0] - self.x
-                spot_y = spot[1] - self.y
-                if -ext_vis <= spot_x <= self.w + ext_vis and -ext_vis <= spot_y <= self.h + ext_vis:
-                    circle = plt.Circle(
-                        (spot_x, spot_y), self.spots_diameter / 2, color="black", fill=False, linewidth=1
-                    )
-                    plt.gca().add_patch(circle)
-
-        else:
-            rad_visium = (self.spots_diameter / 2) * (self.original_size[0] / self.w) / 20  # -> to be changed
-            for i, spot in enumerate(self.spots_center):
-                spot_x = spot[0] - self.x
-                spot_y = spot[1] - self.y
-                if -ext_vis <= spot_x <= self.w + ext_vis and -ext_vis <= spot_y <= self.h + ext_vis:
-                    fig.add_shape(
-                        type="circle",
-                        x0=spot_x - self.spots_diameter / 2,
-                        y0=self.region.shape[0] - (spot_y + self.spots_diameter / 2),
-                        x1=spot_x + self.spots_diameter / 2,
-                        y1=self.region.shape[0] - (spot_y - self.spots_diameter / 2),
-                        line=dict(color="black", width=1),
-                    )
-
-                    fig.add_trace(
-                        go.Scatter(
-                            x=[spot_x],
-                            y=[self.region.shape[0] - spot_y],
-                            mode="markers",
-                            marker=dict(size=rad_visium, color="rgba(0,0,0,0)"),
-                            hoverinfo="text",
-                            text=self.adata.obs.index[i],
-                        )
-                    )
-
-    def _convert_array_to_base64(self, array: np.ndarray) -> str:
-        """
-        Converts a NumPy array to a base64 string.
-
-        Args:
-            array: NumPy array representing an image.
-
-        Returns:
-            Base64-encoded string of the image.
-        """
-
-        image = Image.fromarray(array)
-        buffered = io.BytesIO()
-        image.save(buffered, format="PNG")
-        img_str = base64.b64encode(buffered.getvalue()).decode()
-        return "data:image/png;base64," + img_str
+        return f"{name} — {int(region.size[0])}x{int(region.size[1])} px"
 
 
-def map_cells_to_spots(adata: AnnData, adata_name: str, json_path: str, only_in: bool = True) -> Dict[str, List[str]]:
+def _to_data_uri(image: np.ndarray) -> str:
     """
-    Maps cells to spots based on centroids of the cells and spots.
+    Encodes an image as a PNG data URI, which is how plotly embeds a background.
 
     Args:
-        adata: Anndata object containing the Visium dataset.
-        adata_name: Name of the dataset in the adata object.
-        json_path: Path to the JSON file with cell centroids.
-        only_in: If True, maps cells only if they are located in a spot.
-                 If False, maps cells to the closest spot regardless of distance.
+        image: The image.
 
     Returns:
-        Dictionary mapping cells to spots.
+        The data URI.
     """
 
-    centroid_list = []
-    spots_coordinates = adata.obsm["spatial"].astype("int64")
-    diameter = adata.uns["spatial"][adata_name]["scalefactors"]["spot_diameter_fullres"]
-    spots_ids = adata.obs.index
+    buffer = io.BytesIO()
+    Image.fromarray(image).save(buffer, format="PNG")
 
-    with open(json_path) as json_file:
-        data = json.load(json_file)
-        nuc_info = data["nuc"]
-        for inst in nuc_info:
-            inst_info = nuc_info[inst]
-            inst_centroid = inst_info["centroid"]
-            centroid_list.append(inst_centroid)
+    return "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode()
 
-    # Convert to numpy array for KDTree
-    centroid_array = np.array(centroid_list)
-    spots_array = np.array(spots_coordinates)
 
-    # Create a KDTree for the spots
-    tree = KDTree(spots_array)
-
-    # Create a dictionary to hold the mapping
-    dict_cells_spots = defaultdict(list)
-
-    # Query the KDTree based on only_in parameter
-    for i, cell in enumerate(tqdm(centroid_array, file=tqdm_out, desc="Mapping cells to spots")):
-        if only_in:
-            # "only in" method: find spots within the diameter
-            indices = tree.query_ball_point(cell, r=diameter / 2)
-            for idx in indices:
-                dict_cells_spots[spots_ids[idx]].append(str(i))
-        else:
-            # "not only in" method: find the closest spot within the diameter
-            dist, idx = tree.query(cell)
-            if dist <= diameter:
-                dict_cells_spots[spots_ids[idx]].append(str(i))
-
-    return remove_empty_keys(dict_cells_spots)
+__all__ = ["Region", "SlideVisualizer"]

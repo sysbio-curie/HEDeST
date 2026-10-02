@@ -10,10 +10,10 @@ import torch
 import typer
 from loguru import logger
 
-from hedest.analysis.postseg import map_cells_to_spots
 from hedest.dataset_utils import pp_prop
 from hedest.ppsa import ADJUSTMENT_METHODS
 from hedest.run_model import run_hedest
+from hedest.spots import map_cells_to_spots
 from hedest.utils import format_time
 from hedest.utils import load_spatial_adata
 from hedest.utils import update_spot_diameter
@@ -146,7 +146,7 @@ def main(
             spot_dict = json.load(json_file)
     elif adata is not None and adata_name is not None and json_path is not None:
         logger.info("Mapping cells to the spot in which they are located...")
-        spot_dict = map_cells_to_spots(adata, adata_name, json_path)
+        spot_dict = map_cells_to_spots(adata, adata_name, json_path, mpp=mpp)
     else:
         raise ValueError(
             "To map cells to spots, please provide a valid spot_dict_file or provide adata, adata_name and json_path."

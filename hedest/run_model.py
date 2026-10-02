@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-import json
 import os
-import pickle
 import time
+from pathlib import Path
 from typing import Dict
 from typing import List
 from typing import Optional
@@ -14,7 +13,12 @@ from anndata import AnnData
 from loguru import logger
 from torch import optim
 
+from hedest.analysis.loaders import HedestRun
+from hedest.analysis.loaders import INFO_NAME
+from hedest.analysis.palette import Palette
+from hedest.analysis.palette import palette_from_yaml
 from hedest.analysis.pred_analyzer import PredAnalyzer
+from hedest.analysis.stats import write_stats
 from hedest.dataset import SpotEmbedDataset
 from hedest.dataset_utils import custom_collate
 from hedest.dataset_utils import split_data
@@ -196,79 +200,60 @@ def run_hedest(
         f"(method={ppsa.method}, gated={ppsa.gated})."
     )
 
-    # Save model infos
-    model_info = {
-        "model_name": "default",  # kept for the files written by earlier versions
-        "hidden_dims": hidden_dims,
-        "norm": norm,
-        "dropout": dropout,
-        "spot_dict": spot_dict,
-        "train_spot_dict": train_spot_dict,
-        "proportions": spot_prop_df,
-        "adjustment": ppsa.method,  # PPSA settings actually applied
-        "gated": ppsa.gated,
-        "history": {"train": trainer.history_train, "val": trainer.history_val},
-        "preds": {
-            "pred_best": cell_prob_best,
-            "pred_best_adjusted": cell_prob_best_adjusted,
+    # Save everything the analysis package needs to re-open this run
+    run = HedestRun(
+        predictions_raw=cell_prob_best,
+        predictions_adjusted=cell_prob_best_adjusted,
+        spot_dict=spot_dict,
+        proportions=spot_prop_df,
+        params={
+            "hidden_dims": hidden_dims,
+            "norm": norm,
+            "dropout": dropout,
+            "embed_size": embed_size,
+            "num_classes": num_classes,
+            "batch_size": batch_size,
+            "lr": lr,
+            "divergence": divergence,
+            "alpha": alpha,
+            "beta": beta,
+            "adjustment": ppsa.method,  # the PPSA settings actually applied
+            "gated": ppsa.gated,
+            "epochs": epochs,
+            "train_size": train_size,
+            "val_size": val_size,
+            "rs": rs,
+            "train_time": TRAIN_TIME,
         },
-    }
+        history={"train": trainer.history_train, "val": trainer.history_val},
+        train_spot_dict=train_spot_dict,
+        run_dir=Path(out_dir),
+        seeds=[rs],
+    )
+    run.save(Path(out_dir) / INFO_NAME)
 
-    info_dir = os.path.join(out_dir, "info.pickle")
-    logger.info(f"Saving objects to {info_dir}...")
-    with open(info_dir, "wb") as f:
-        pickle.dump(model_info, f)
+    logger.info("Computing the run statistics...")
+    write_stats(Path(out_dir) / "stats.xlsx", run)
 
-    # Extract and save statistics
-    logger.info("Extracting and saving statistics...")
-
-    # Load seg_dict once if needed for GeoJSON export
-    seg_dict_raw = None
-    if save_geojson and json_path is not None:
-        with open(json_path, "r") as f:
-            seg_dict_raw = json.load(f)
-    elif save_geojson and json_path is None:
-        logger.warning("save_geojson=True but json_path is None — GeoJSON export will be skipped.")
-
-    # Instantiate PredAnalyzer objects (with seg_dict if available)
-    analyzer_best = PredAnalyzer(model_info=model_info, adjusted=False, seg_dict=seg_dict_raw)
-    analyzer_best_adj = PredAnalyzer(model_info=model_info, adjusted=True, seg_dict=seg_dict_raw)
-
-    # Extract stats
-    stats_best_predicted = analyzer_best.extract_stats(metric="predicted")
-    stats_best_all = analyzer_best.extract_stats(metric="all")
-    stats_best_adj_predicted = analyzer_best_adj.extract_stats(metric="predicted")
-    stats_best_adj_all = analyzer_best_adj.extract_stats(metric="all")
-
-    with pd.ExcelWriter(os.path.join(out_dir, "stats.xlsx")) as writer:
-        stats_best_predicted.to_excel(writer, sheet_name="best_predicted", index=False)
-        stats_best_all.to_excel(writer, sheet_name="best_all", index=False)
-        stats_best_adj_predicted.to_excel(writer, sheet_name="best_adj_predicted", index=False)
-        stats_best_adj_all.to_excel(writer, sheet_name="best_adj_all", index=False)
-
-    # GeoJSON export
-    if save_geojson and seg_dict_raw is not None:
+    # GeoJSON export for QuPath
+    if save_geojson and json_path is None:
+        logger.warning("save_geojson=True but json_path is None: no cell contours, so nothing is exported.")
+    elif save_geojson:
         import yaml
-        from hedest.utils import seg_dict_to_geojson, generate_color_dict
 
         if color_dict_file is not None:
-            with open(color_dict_file, "r") as f:
-                color_dict = yaml.safe_load(f)
+            with open(color_dict_file) as color_file:
+                palette = palette_from_yaml(yaml.safe_load(color_file))
         else:
-            color_dict = generate_color_dict(ct_list, format="special")
+            palette = Palette(ct_list)
             auto_color_path = os.path.join(out_dir, "auto_color_dict.yaml")
-            with open(auto_color_path, "w") as f:
-                yaml.dump(color_dict, f)
-            logger.info(f"Auto-generated color dict saved to {auto_color_path}")
+            with open(auto_color_path, "w") as color_file:
+                yaml.dump(palette.as_geojson_dict(), color_file)
+            logger.info(f"Colour dictionary saved to {auto_color_path}")
 
-        geojson_path_best = os.path.join(out_dir, "hedest_predictions.geojson")
-        geojson_path_best_adj = os.path.join(out_dir, "hedest_predictions_adj.geojson")
-
-        seg_dict_to_geojson(analyzer_best.seg_dict_w_class, geojson_path_best, color_dict=color_dict)
-        logger.info(f"GeoJSON (unadjusted) exported to {geojson_path_best}")
-
-        seg_dict_to_geojson(analyzer_best_adj.seg_dict_w_class, geojson_path_best_adj, color_dict=color_dict)
-        logger.info(f"GeoJSON (adjusted) exported to {geojson_path_best_adj}")
+        for adjusted, name in ((True, "hedest_predictions_adj.geojson"), (False, "hedest_predictions.geojson")):
+            analyzer = PredAnalyzer(run, seg=json_path, palette=palette, adjusted=adjusted)
+            analyzer.export_geojson(Path(out_dir) / name)
 
     logger.info("Secondary deconvolution process completed successfully.")
     logger.info(f"Training time: {TRAIN_TIME}")

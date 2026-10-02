@@ -41,6 +41,12 @@ matplotlib==3.9.2
 seaborn==0.13.2
 plotly==5.23.0
 
+# notebooks (the analysis tutorials and the case study)
+jupyterlab==4.2.5
+ipykernel==6.29.5
+nbconvert==7.16.4
+nbformat==5.10.4
+
 # files, CLI, logging
 PyYAML==6.0.2
 openpyxl==3.1.5

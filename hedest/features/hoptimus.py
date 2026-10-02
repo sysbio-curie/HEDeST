@@ -38,6 +38,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from typing import Any
 from typing import Dict
 from typing import List
 from typing import Optional
@@ -168,6 +169,78 @@ def pool_cell(
     return (w @ tokens) / w.sum()
 
 
+def _hub_offline(enabled: bool) -> None:
+    """
+    Switches the Hugging Face hub between the local cache and the network.
+
+    Args:
+        enabled: True to forbid any call to the hub. The environment variable covers a hub
+            that has not been imported yet, the constant one that already has.
+    """
+
+    os.environ["HF_HUB_OFFLINE"] = "1" if enabled else "0"
+    try:
+        from huggingface_hub import constants
+
+        constants.HF_HUB_OFFLINE = enabled
+    except ImportError:  # no hub installed: the environment variable is all there is to set
+        pass
+
+
+def _load_hoptimus() -> Any:
+    """
+    Builds H-Optimus-0, from the local Hugging Face cache when it holds it.
+
+    H-Optimus-0 lives in a gated repository, and timm first asks the hub for a
+    ``model.safetensors`` that its published snapshot does not have. That request is refused
+    with a 401 unless the machine is authenticated, which kills the whole stage even when
+    ``pytorch_model.bin`` is sitting in the cache. Reading the cache first therefore makes
+    the embeddings work offline, and on a machine whose token has expired; the download only
+    happens when the cache has nothing to offer.
+
+    Returns:
+        The model, as timm builds it.
+
+    Raises:
+        RuntimeError: If the weights are neither cached nor downloadable.
+    """
+
+    import timm  # imported here so the rest of HEDeST does not need it
+
+    def build() -> Any:
+        return timm.create_model(HOPTIMUS_MODEL, pretrained=True, init_values=1e-5, dynamic_img_size=False)
+
+    forced_offline = os.environ.get("HF_HUB_OFFLINE", "") not in ("", "0")
+
+    _hub_offline(True)
+    try:
+        model = build()
+        logger.info("-> H-Optimus-0 read from the local Hugging Face cache.")
+        return model
+    except Exception as cache_error:
+        reason = f"not in the Hugging Face cache ({type(cache_error).__name__})"
+    finally:
+        _hub_offline(forced_offline)
+
+    if forced_offline:
+        raise RuntimeError(
+            f"{HOPTIMUS_MODEL} is {reason}, and HF_HUB_OFFLINE is set, so the hub was not contacted. "
+            "Copy the cache (~/.cache/huggingface/hub/models--bioptimus--H-optimus-0) over, or unset "
+            "HF_HUB_OFFLINE on a machine that has access to the hub."
+        )
+
+    logger.info(f"H-Optimus-0 is {reason}, downloading it.")
+    try:
+        return build()
+    except Exception as error:
+        raise RuntimeError(
+            f"Could not get the {HOPTIMUS_MODEL} weights, from the cache or from the hub. H-Optimus-0 is "
+            "gated: ask for access at https://huggingface.co/bioptimus/H-optimus-0, then authenticate this "
+            "machine with `huggingface-cli login` or by setting HF_TOKEN. A machine with no network needs "
+            "the cache copied over from one that has it."
+        ) from error
+
+
 def _load_segmentation(json_path: str) -> Tuple[List[dict], Optional[float]]:
     """
     Loads the nuclei of a segmentation file, in file order.
@@ -226,8 +299,6 @@ def extract_hoptimus_embeddings(
         ValueError: If the resolution of the slide cannot be determined.
     """
 
-    import timm  # imported here so the rest of HEDeST does not need it
-
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 
     start = time.time()
@@ -261,7 +332,7 @@ def extract_hoptimus_embeddings(
         f"setup {time.time() - start:.1f}s"
     )
 
-    model = timm.create_model(HOPTIMUS_MODEL, pretrained=True, init_values=1e-5, dynamic_img_size=False)
+    model = _load_hoptimus()
     model.eval().to(device)
     n_prefix = int(getattr(model, "num_prefix_tokens", 5))
     if device == "cuda":
