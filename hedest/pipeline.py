@@ -10,7 +10,8 @@ The stages are:
 3. ``segment``  HoVer-Net nuclei segmentation, writing one JSON whose nuclei are numbered
                 0..N-1, which is the cell id convention of the whole package.
 4. ``features`` H-Optimus-0 tile embeddings pooled per cell (see hedest.features.hoptimus).
-5. ``train``    HEDeST itself, through hedest/main.py.
+5. ``train``    HEDeST itself, through hedest/main.py. One seed, or several, in which
+                case the runs are aggregated into one set of mean predictions.
 
 HoVer-Net needs its own environment, so the mask and segmentation stages are run as
 subprocesses whose interpreter is configurable (``python`` key of each section).
@@ -30,6 +31,7 @@ from typing import Any
 from typing import Dict
 from typing import List
 from typing import Optional
+from typing import Tuple
 
 import typer
 import yaml
@@ -147,7 +149,9 @@ train:
   val_size: 0.1
   save_geojson: false
   color_dict_file: null
-  rs: 42
+  rs: 42                         # one seed, or a list such as [0, 1, 2, 3, 4]: every seed
+                                 # is then trained in its own subfolder and the runs are
+                                 # aggregated into mean predictions
 """
 
 
@@ -239,6 +243,38 @@ def _paths(config: Dict[str, Any]) -> Dict[str, Any]:
         "model_dir": out_dir / "model",
         "state": out_dir / "pipeline.json",
     }
+
+
+def _seeds(configured: Any) -> Tuple[List[int], bool]:
+    """
+    Reads the seeds to train from the configuration.
+
+    Args:
+        configured: ``train.rs``, either one seed or a list of them.
+
+    Returns:
+        The seeds, and whether they were given as a list. A list keeps every run in its own
+        ``seed_*`` subfolder and asks for an aggregate, even when it holds a single seed, so
+        the layout only depends on how the configuration was written.
+
+    Raises:
+        ValueError: If the seeds are not integers, or if the list is empty or has duplicates.
+    """
+
+    several = isinstance(configured, (list, tuple))
+    values = list(configured) if several else [configured]
+
+    try:
+        seeds = [int(value) for value in values]
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"'train.rs' must be a seed or a list of seeds, got {configured!r}.") from error
+
+    if not seeds:
+        raise ValueError("'train.rs' is an empty list: give at least one seed.")
+    if len(set(seeds)) != len(seeds):
+        raise ValueError(f"'train.rs' holds the same seed twice: {seeds}.")
+
+    return seeds, several
 
 
 def _gpu(configured: Optional[str]) -> str:
@@ -599,33 +635,29 @@ def stage_features(config: Dict[str, Any], paths: Dict[str, Any], state: Dict[st
     return state
 
 
-def stage_train(config: Dict[str, Any], paths: Dict[str, Any], state: Dict[str, Any]) -> Dict[str, Any]:
+def _train_command(
+    config: Dict[str, Any],
+    state: Dict[str, Any],
+    features: str,
+    out_dir: Path,
+    seed: int,
+) -> List[Any]:
     """
-    Trains HEDeST on the embeddings, through hedest/main.py.
+    Builds the ``hedest.main`` command that trains one seed.
 
     Args:
         config: The pipeline configuration.
-        paths: The output layout.
-        state: The state of the run.
+        state: The state of the run, for the segmentation and the resolution.
+        features: Path of the embeddings.
+        out_dir: Where this seed writes its run.
+        seed: The random seed.
 
     Returns:
-        The updated state, holding the model directory.
-
-    Raises:
-        ValueError: If the proportions are missing.
-        RuntimeError: If the embeddings are missing.
+        The command to run.
     """
 
     train = config["train"]
-    if not train.get("spot_prop_file"):
-        raise ValueError("'train.spot_prop_file' is required to train HEDeST.")
-
-    features = state.get("features", str(paths["features"]))
-    if not Path(features).exists():
-        raise RuntimeError(f"No embeddings at {features}. Run the 'features' stage before 'train'.")
-
-    paths["model_dir"].mkdir(parents=True, exist_ok=True)
-    command = [
+    command: List[Any] = [
         sys.executable,
         "-u",
         "-m",
@@ -659,9 +691,9 @@ def stage_train(config: Dict[str, Any], paths: Dict[str, Any], state: Dict[str, 
         "--val-size",
         train["val_size"],
         "--out-dir",
-        str(paths["model_dir"]),
+        str(out_dir),
         "--rs",
-        train["rs"],
+        seed,
     ]
 
     for option, key in (
@@ -678,8 +710,63 @@ def stage_train(config: Dict[str, Any], paths: Dict[str, Any], state: Dict[str, 
     if train.get("save_geojson"):
         command.append("--save-geojson")
 
-    _run_command(command, stage="train")
+    return command
+
+
+def stage_train(config: Dict[str, Any], paths: Dict[str, Any], state: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Trains HEDeST on the embeddings, through hedest/main.py.
+
+    With a single seed the run lands directly in ``{out_dir}/model``. With a list of them,
+    each seed gets its own ``{out_dir}/model/seed_{rs}`` and the runs are then averaged into
+    ``info_aggregated.pickle`` next to them, which is what ``load_run`` opens by default.
+    Training on several seeds is the cheapest measure of confidence HEDeST has: it is
+    supervised at the spot level, so two seeds can call a cell differently while fitting the
+    spots equally well, and where they agree is worth knowing.
+
+    Args:
+        config: The pipeline configuration.
+        paths: The output layout.
+        state: The state of the run.
+
+    Returns:
+        The updated state, holding the model directory and the seeds that were trained.
+
+    Raises:
+        ValueError: If the proportions are missing, or the seeds are malformed.
+        RuntimeError: If the embeddings are missing.
+    """
+
+    from hedest.aggregate_seeds import aggregate_seeds
+
+    train = config["train"]
+    if not train.get("spot_prop_file"):
+        raise ValueError("'train.spot_prop_file' is required to train HEDeST.")
+
+    features = state.get("features", str(paths["features"]))
+    if not Path(features).exists():
+        raise RuntimeError(f"No embeddings at {features}. Run the 'features' stage before 'train'.")
+
+    seeds, several = _seeds(train.get("rs", 42))
+    paths["model_dir"].mkdir(parents=True, exist_ok=True)
+
+    for position, seed in enumerate(seeds, start=1):
+        out_dir = paths["model_dir"] / f"seed_{seed}" if several else paths["model_dir"]
+        label = f"train (seed {seed}, {position}/{len(seeds)})" if several else "train"
+        _run_command(_train_command(config, state, features, out_dir, seed), stage=label)
+
     state["model"] = str(paths["model_dir"])
+    state["seeds"] = seeds
+
+    if several:
+        logger.info(f"Aggregating the {len(seeds)} seed runs of {paths['model_dir']}...")
+        aggregate_seeds(
+            run_dir=paths["model_dir"],
+            # The GeoJSON of the aggregate is written only when the seeds exported theirs.
+            json_path=state.get("segmentation") if train.get("save_geojson") else None,
+            color_dict_file=train.get("color_dict_file"),
+        )
+        state["aggregate"] = str(paths["model_dir"] / "info_aggregated.pickle")
 
     return state
 
