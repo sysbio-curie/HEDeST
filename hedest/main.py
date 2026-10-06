@@ -13,7 +13,9 @@ from loguru import logger
 from hedest.dataset_utils import pp_prop
 from hedest.ppsa import ADJUSTMENT_METHODS
 from hedest.run_model import run_hedest
+from hedest.spots import export_spot_pies
 from hedest.spots import map_cells_to_spots
+from hedest.spots import SPOT_PIES_NAME
 from hedest.utils import format_time
 from hedest.utils import load_spatial_adata
 from hedest.utils import update_spot_diameter
@@ -77,6 +79,9 @@ def main(
     val_size: float = typer.Option(0.1, help="Validation set size as a fraction."),
     out_dir: str = typer.Option("results", help="Output directory."),
     save_geojson: bool = typer.Option(False, help="Whether to export a GeoJSON file for QuPath."),
+    save_spot_pies: bool = typer.Option(
+        False, help="Whether to also export the spot proportions as pies for QuPath (needs path_st_adata)."
+    ),
     color_dict_file: Optional[str] = typer.Option(None, help="Path to a YAML color dict (special format)."),
     rs: int = typer.Option(42, help="Random seed"),
 ):
@@ -199,6 +204,19 @@ def main(
         color_dict_file=color_dict_file,
         rs=rs,
     )
+
+    if save_spot_pies and adata is None:
+        logger.warning("save_spot_pies=True but path_st_adata is None: no spot positions, so no pies are exported.")
+    elif save_spot_pies:
+        export_spot_pies(
+            spot_prop_df,
+            adata,
+            os.path.join(out_dir, SPOT_PIES_NAME),
+            mpp=mpp,
+            adata_name=adata_name,
+            palette=color_dict_file,
+        )
+
     TOTAL_TIME = format_time(time.time() - MAIN_START)
     logger.info(f"Total time: {TOTAL_TIME}\n")
 

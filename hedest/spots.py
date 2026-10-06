@@ -1,5 +1,5 @@
 """
-Spot geometry and cell-to-spot mapping.
+Spot geometry, cell-to-spot mapping, and the spots drawn as pies for QuPath.
 
 A spatial transcriptomics spot is a disc on the slide. Everything HEDeST does with spots
 needs two things: where the spots are, and which cells fall inside them.
@@ -14,11 +14,18 @@ uses it when given, so a caller can never silently inherit the visualization val
 file: the first nucleus of the JSON is ``"0"``, the second ``"1"``, and so on. HoVer-Net's
 ``run_infer.py`` re-indexes its output this way, so the ids here, the ones in the feature
 dictionary and the ones in the prediction tables all refer to the same nuclei.
+
+**The spot pies.** ``export_spot_pies`` draws every spot as a pie of its cell-type
+proportions, in a GeoJSON to load in QuPath together with the cell GeoJSON of a run. It needs
+no trained model, only the proportions and the spot positions.
 """
 from __future__ import annotations
 
 import json
+import math
+import os
 from collections import defaultdict
+from pathlib import Path
 from typing import Any
 from typing import Dict
 from typing import List
@@ -27,11 +34,15 @@ from typing import Optional
 from typing import Union
 
 import numpy as np
+import pandas as pd
+import yaml
 from anndata import AnnData
 from loguru import logger
 from scipy.spatial import KDTree
 
 VISIUM_SPOT_DIAMETER_UM = 55.0
+SPOT_PIES_NAME = "spot_pies.geojson"
+PIE_POINTS = 64  # points on the outline of a whole pie
 
 
 class SpotGeometry(NamedTuple):
@@ -209,3 +220,138 @@ def cells_in_spots(spot_dict: Dict[str, List[str]]) -> set[str]:
     """
 
     return {cell_id for cell_ids in spot_dict.values() for cell_id in cell_ids}
+
+
+def _wedge(x: float, y: float, radius: float, start: float, end: float) -> List[List[float]]:
+    """
+    Outline of a pie wedge, in slide pixels.
+
+    Args:
+        x, y: Centre of the pie.
+        radius: Its radius.
+        start, end: Where the wedge starts and ends, as fractions of a turn, clockwise from
+            12 o'clock (y points down in the slide).
+
+    Returns:
+        The closed outline, as [x, y] points.
+    """
+
+    steps = max(1, math.ceil((end - start) * PIE_POINTS))
+    arc = [
+        [
+            round(x + radius * math.sin(2 * math.pi * angle), 1),
+            round(y - radius * math.cos(2 * math.pi * angle), 1),
+        ]
+        for angle in (start + (end - start) * i / steps for i in range(steps + 1))
+    ]
+    if end - start > 1 - 1e-6:  # the whole pie: a disc, already closed
+        return arc
+    centre = [round(x, 1), round(y, 1)]
+
+    return [centre, *arc, centre]
+
+
+def export_spot_pies(
+    proportions: Union[str, Path, pd.DataFrame],
+    adata: Union[str, Path, AnnData],
+    path: Union[str, Path],
+    mpp: Optional[float] = None,
+    adata_name: Optional[str] = None,
+    palette: Any = None,
+) -> int:
+    """
+    Writes the cell-type proportions of the spots as pies, in a GeoJSON for QuPath.
+
+    Every spot is drawn at its centre with its diameter, one wedge per cell type present,
+    whose angle is the proportion of the cell type. The proportions are normalised per spot,
+    as HEDeST trains on them, and the wedges start at 12 o'clock and follow the columns of the
+    table, so a cell type always sits at the same place. A spot missing from the AnnData, or
+    whose row holds no positive proportion, is not drawn.
+
+    Loaded in QuPath together with the cell GeoJSON of a run, the pies show the two scales on
+    top of each other with the same colours: the cells are *detections* and the wedges
+    *annotations*, so 'D' shows or hides the cells, 'A' the pies, 'F' and 'Shift+F' fill them.
+    Every wedge is locked and carries its proportion as a measurement, and the spot barcode as
+    metadata (QuPath >= 0.5).
+
+    Args:
+        proportions: The proportions (spots x cell types), or the path of their CSV.
+        adata: The AnnData object of the slide, or its path, for the spot centres.
+        path: The GeoJSON to write.
+        mpp: Microns per pixel of the slide, so the spots get their real diameter (55 / mpp).
+            Strongly recommended: see the module docstring.
+        adata_name: Key under ``adata.uns['spatial']``, only read without mpp. Defaults to
+            the first one.
+        palette: The colours: a ``Palette``, or the path of a YAML colour dictionary (special
+            format). Defaults to the palette main.py and aggregate_seeds.py build from the
+            cell types, so the pies take the colours of the cell GeoJSON of the run.
+
+    Returns:
+        The number of spots drawn.
+    """
+
+    from hedest.analysis.palette import Palette
+    from hedest.analysis.palette import palette_from_yaml
+    from hedest.dataset_utils import pp_prop
+    from hedest.utils import load_spatial_adata
+    from hedest.utils import rgba_to_colorRGB
+
+    table = pp_prop(proportions.copy() if isinstance(proportions, pd.DataFrame) else str(proportions))
+
+    if not isinstance(adata, AnnData):
+        adata = load_spatial_adata(str(adata))
+    if mpp is None and adata_name is None:
+        adata_name = next(iter(adata.uns.get("spatial", {})), None)
+    geometry = spot_geometry(adata, adata_name, mpp=mpp)
+    centres = dict(zip(map(str, geometry.ids), geometry.centers[:, :2]))
+    radius = geometry.diameter / 2
+
+    missing = [spot for spot in table.index if spot not in centres]
+    if missing:
+        logger.warning(f"{len(missing)} spot(s) of the proportions are not in the AnnData and are not drawn.")
+
+    if palette is None:
+        palette = Palette(list(table.columns))
+    elif not isinstance(palette, Palette):
+        with open(palette) as color_file:
+            palette = palette_from_yaml(yaml.safe_load(color_file))
+    classes = {name: {"name": name, "colorRGB": rgba_to_colorRGB(palette.rgb255(name))} for name in table.columns}
+
+    features = []
+    drawn = 0
+    for spot, row in table.iterrows():
+        if spot not in centres:
+            continue
+        x, y = centres[spot]
+        start = 0.0
+        for name, value in row.items():
+            if not value > 0:  # also skips NaN
+                continue
+            end = min(1.0, start + value)
+            features.append(
+                {
+                    "type": "Feature",
+                    "geometry": {"type": "Polygon", "coordinates": [_wedge(x, y, radius, start, end)]},
+                    "properties": {
+                        "objectType": "annotation",
+                        "classification": classes[name],
+                        "isLocked": True,
+                        "measurements": [{"name": "Proportion", "value": round(float(value), 4)}],
+                        "metadata": {"spot": spot},
+                    },
+                }
+            )
+            start = end
+        drawn += start > 0
+
+    # Written aside then moved, so an interrupted export never leaves a truncated file behind
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "w") as f:
+        json.dump({"type": "FeatureCollection", "features": features}, f)
+    os.replace(tmp, path)
+
+    logger.info(f"{drawn} spots drawn as pies ({len(features)} wedges) in {path}")
+
+    return drawn

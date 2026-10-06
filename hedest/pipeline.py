@@ -11,7 +11,8 @@ The stages are:
                 0..N-1, which is the cell id convention of the whole package.
 4. ``features`` H-Optimus-0 tile embeddings pooled per cell (see hedest.features.hoptimus).
 5. ``train``    HEDeST itself, through hedest/main.py. One seed, or several, in which
-                case the runs are aggregated into one set of mean predictions.
+                case the runs are aggregated into one set of mean predictions. Optionally,
+                the spot proportions are also drawn as pies for QuPath.
 
 HoVer-Net needs its own environment, so the mask and segmentation stages are run as
 subprocesses whose interpreter is configurable (``python`` key of each section).
@@ -92,6 +93,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "train_size": 0.8,
         "val_size": 0.1,
         "save_geojson": False,
+        "save_spot_pies": False,
         "color_dict_file": None,
         "rs": 42,
     },
@@ -148,6 +150,8 @@ train:
   train_size: 0.8
   val_size: 0.1
   save_geojson: false
+  save_spot_pies: false          # also the spot proportions as pies, to view with the cells in
+                                 # QuPath (model/spot_pies.geojson); needs path_st_adata
   color_dict_file: null
   rs: 42                         # one seed, or a list such as [0, 1, 2, 3, 4]: every seed
                                  # is then trained in its own subfolder and the runs are
@@ -724,6 +728,9 @@ def stage_train(config: Dict[str, Any], paths: Dict[str, Any], state: Dict[str, 
     supervised at the spot level, so two seeds can call a cell differently while fitting the
     spots equally well, and where they agree is worth knowing.
 
+    With ``train.save_spot_pies``, the proportions are also drawn as pies over the spots in
+    ``{out_dir}/model/spot_pies.geojson``, once whatever the number of seeds.
+
     Args:
         config: The pipeline configuration.
         paths: The output layout.
@@ -733,15 +740,20 @@ def stage_train(config: Dict[str, Any], paths: Dict[str, Any], state: Dict[str, 
         The updated state, holding the model directory and the seeds that were trained.
 
     Raises:
-        ValueError: If the proportions are missing, or the seeds are malformed.
+        ValueError: If the proportions are missing, if the spot pies are asked for without
+            the AnnData, or if the seeds are malformed.
         RuntimeError: If the embeddings are missing.
     """
 
     from hedest.aggregate_seeds import aggregate_seeds
+    from hedest.spots import export_spot_pies
+    from hedest.spots import SPOT_PIES_NAME
 
     train = config["train"]
     if not train.get("spot_prop_file"):
         raise ValueError("'train.spot_prop_file' is required to train HEDeST.")
+    if train.get("save_spot_pies") and not train.get("path_st_adata"):
+        raise ValueError("'train.save_spot_pies' needs 'train.path_st_adata', which holds the spot positions.")
 
     features = state.get("features", str(paths["features"]))
     if not Path(features).exists():
@@ -767,6 +779,18 @@ def stage_train(config: Dict[str, Any], paths: Dict[str, Any], state: Dict[str, 
             color_dict_file=train.get("color_dict_file"),
         )
         state["aggregate"] = str(paths["model_dir"] / "info_aggregated.pickle")
+
+    if train.get("save_spot_pies"):
+        pies = paths["model_dir"] / SPOT_PIES_NAME
+        export_spot_pies(
+            train["spot_prop_file"],
+            train["path_st_adata"],
+            pies,
+            mpp=state["mpp"],
+            adata_name=train.get("adata_name"),
+            palette=train.get("color_dict_file"),
+        )
+        state["spot_pies"] = str(pies)
 
     return state
 

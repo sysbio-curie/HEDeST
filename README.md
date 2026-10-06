@@ -65,7 +65,7 @@ hedest/              → Source code for HEDeST and analysis tools
   main.py            → HEDeST training alone
   features/          → Cell feature extraction (H-Optimus-0)
   slide.py           → Slide checking and conversion to pyramidal TIFF
-  spots.py           → Spot geometry and cell-to-spot mapping
+  spots.py           → Spot geometry, cell-to-spot mapping and spot pies for QuPath
   aggregate_seeds.py → Combines the seeds of one study
   analysis/          → Visualization and analysis of the predictions
 gridsearch/          → Parameter gridsearch against ground truth cell types
@@ -101,7 +101,7 @@ This runs the five stages in order and writes everything under ``out_dir`` (``sl
 - **features** — H-Optimus-0 tile embeddings pooled per nucleus.
 - **train** — HEDeST itself.
 
-HoVer-Net usually needs its own environment: set ``segmentation.python`` to that interpreter in the config. Set ``segmentation.image_dict_path`` to a ``.pt`` path if you also want the cell crops for later plotting (they are large, so the default is to skip them).
+HoVer-Net usually needs its own environment: set ``segmentation.python`` to that interpreter in the config. Set ``segmentation.image_dict_path`` to a ``.pt`` path if you also want the cell crops for later plotting (they are large, so the default is to skip them). Set ``train.save_spot_pies`` to also draw the spot proportions as pies for QuPath (see [Analysing the results](#analysing-the-results)).
 
 Run only part of it with ``--stages``, for instance ``--stages mask,segment``. Each stage checks the outputs of the previous one and reuses what is already there.
 
@@ -186,6 +186,10 @@ palette = Palette.from_colors({"T": "#d62728", "B": "tab:blue"}, names=run.ct_li
 analyzer = PredAnalyzer(run, palette=palette, ...)
 ```
 Any matplotlib colour works, the cell types you leave out keep their default colour, and ``palette_from_yaml`` rebuilds the palette a run was exported with from the colour dictionary written next to its GeoJSON.
+
+### In QuPath
+
+With ``--save-geojson``, a run writes its cells with their predicted type (``hedest_predictions_adj.geojson``, and ``hedest_predictions_aggregated_adj.geojson`` for an aggregate): drag it onto the slide. With ``--save-spot-pies`` (``train.save_spot_pies`` in the pipeline, which writes a single file whatever the number of seeds, or ``hedest.spots.export_spot_pies`` from Python at any time, no model needed), ``spot_pies.geojson`` draws every spot at its centre with its real diameter, as a pie of the proportions HEDeST is trained on, with the colours of the cells (give the same ``--color-dict-file`` to both if you use one). Load the two files together to switch between the two scales: the cells are *detections* and the wedges *annotations*, so ``D`` shows or hides the cells, ``A`` the pies, ``F`` and ``Shift+F`` fill them. The wedges are locked; each one holds its proportion as a measurement and its spot barcode as metadata.
 
 ## Tutorial
 
