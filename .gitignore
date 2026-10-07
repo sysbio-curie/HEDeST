@@ -21,8 +21,8 @@ logs
 models
 *.pdf
 review
-simulations/full_simulations/figures
 simulations/full_simulations/logs
+simulations/full_simulations/plots
 simulations/semi_simulations/figures
 
 debug.log
