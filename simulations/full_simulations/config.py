@@ -1,4 +1,4 @@
-"""Single source of truth for the v2 fully simulated datasets (paths, seeds, weights, dataset list)."""
+"""Single source of truth for the fully simulated datasets (paths, seeds, weights, dataset list)."""
 from __future__ import annotations
 
 import os
@@ -16,7 +16,7 @@ HIRES_IMAGE_PATH = os.path.join(DATA, "ST", "spatial", "tissue_hires_image.png")
 SCALEFACTORS_PATH = os.path.join(DATA, "ST", "spatial", "scalefactors_json.json")
 
 # outputs
-SIM_DIR = os.path.join(DATA, "sim_v2")
+SIM_DIR = os.path.join(DATA, "sim")
 CONSTRUCTION_DIR = os.path.join(SIM_DIR, "construction")  # clustering cache
 FIG_DIR = os.path.join(HERE, "figures")
 

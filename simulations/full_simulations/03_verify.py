@@ -1,7 +1,7 @@
-"""Step 3 - check every file in sim_v2/ and write the dataset summary.
+"""Step 3 - check every file in sim/ and write the dataset summary.
 
 Checks (the ones that held for the legacy sim/, plus the cross-dataset ones):
-  * all expected files exist, nothing unexpected in sim_v2/
+  * all expected files exist, nothing unexpected in sim/
   * spot_dict: number of spots, no empty spot, no cell in two spots
   * gt: exactly the cells present in spots, sorted by id, one-hot, columns Cluster 0..n-1
   * prop: same columns as gt, rows in spot order, equal to the proportions recomputed from spot_dict + gt

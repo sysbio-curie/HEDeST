@@ -22,8 +22,7 @@ models
 *.pdf
 review
 simulations/full_simulations/figures
-simulations/full_simulations_v2/figures
-simulations/full_simulations_v2/logs
+simulations/full_simulations/logs
 simulations/semi_simulations/figures
 
 debug.log

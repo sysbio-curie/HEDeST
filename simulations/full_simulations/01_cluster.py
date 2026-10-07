@@ -4,7 +4,7 @@ For every K in config.KS: K-means (Euclidean, raw 1536-d embeddings, n_init=10),
 config.N_PER_CLUSTER cells closest to each centroid are retained. One K-means per K is
 shared by every dataset with that K, so cluster numbers mean the same thing across them.
 
-Cached in sim_v2/construction/ (reused on reruns, --force recomputes):
+Cached in sim/construction/ (reused on reruns, --force recomputes):
   cell_ids.npy, kmeans_K{K}.npz, umap.npy, centroids_xy.npy, clusters_summary.csv
 Figures (png + svg) in figures/construction/K{K}/.
 """

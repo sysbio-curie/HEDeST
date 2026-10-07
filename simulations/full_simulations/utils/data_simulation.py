@@ -1,6 +1,9 @@
-"""Helpers for the fully simulated datasets (v2).
+"""Helpers for the fully simulated datasets.
 
-Copied from ``simulations/full_simulations/dataset_construction/utils/data_simulation.py``.
+Copied from the ``dataset_construction/utils/data_simulation.py`` of the first version of this
+study, which this folder replaced and which has been deleted; "legacy" below always means that
+code and the datasets it built. It is in the git history at
+``simulations/full_simulations/dataset_construction/``, up to commit 0f4c6ea.
 Changes to the copied functions do not alter their results, except where stated:
 
 * ``create_bags``: the ``not_mixed`` check looks clusters up in a dict instead of scanning

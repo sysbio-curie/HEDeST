@@ -1,4 +1,4 @@
-"""Step 2 - build every dataset of config.DATASETS into sim_v2/ (same layout as sim/).
+"""Step 2 - build every dataset of config.DATASETS into sim/ (same layout as sim/).
 
 Per dataset tag:
   {tag}_spot_dict.json               spot id -> cell ids
