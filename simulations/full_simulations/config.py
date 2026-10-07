@@ -18,7 +18,15 @@ SCALEFACTORS_PATH = os.path.join(DATA, "ST", "spatial", "scalefactors_json.json"
 # outputs
 SIM_DIR = os.path.join(DATA, "sim")
 CONSTRUCTION_DIR = os.path.join(SIM_DIR, "construction")  # clustering cache
-FIG_DIR = os.path.join(HERE, "figures")
+
+# Everything this folder draws goes under plots/, one subfolder per step:
+#   construction/K{K}/   step 1, the clustering
+#   datasets/{tag}/      step 2, one folder per dataset, plus the step 3 reports
+#   hedest_results/      step 5, the scores of the HEDeST runs
+PLOT_DIR = os.path.join(HERE, "plots")
+CONSTRUCTION_PLOT_DIR = os.path.join(PLOT_DIR, "construction")
+DATASET_PLOT_DIR = os.path.join(PLOT_DIR, "datasets")
+RESULT_PLOT_DIR = os.path.join(PLOT_DIR, "hedest_results")
 
 EMB_NAME = "hoptimus"  # replaces "moco" in the legacy tags
 IMAGE_SUFFIX = "image_dict_64px_20um"

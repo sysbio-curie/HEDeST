@@ -99,7 +99,13 @@ def prepare_data(ground_truth: pd.DataFrame, spot_dict: dict, embeddings: dict):
 
 
 def main(
-    data_path: str, gt_filename: str, spot_dict_filename: str, embeddings_filename: str, n_iter: int, output_xlsx: str
+    data_path: str,
+    gt_filename: str,
+    spot_dict_filename: str,
+    embeddings_filename: str,
+    n_iter: int,
+    output_xlsx: str,
+    seed: int | None = None,
 ):
     """
     Main function to run hierarchical permutation evaluation.
@@ -111,7 +117,13 @@ def main(
         embeddings_filename: Filename for embeddings PT file.
         n_iter: Number of repetitions.
         output_xlsx: Path to output Excel file.
+        seed: Seed of the initial random permutation, so that a repetition can be reproduced
+              and run on its own. Left unseeded when None, as before.
     """
+
+    if seed is not None:
+        np.random.seed(seed)
+        print(f"-> numpy seeded with {seed}")
 
     ground_truth_path = os.path.join(data_path, gt_filename)
     spot_dict_path = os.path.join(data_path, spot_dict_filename)
@@ -168,6 +180,7 @@ if __name__ == "__main__":
     parser.add_argument("--embeddings_filename", type=str, required=True, help="PT file with embeddings.")
     parser.add_argument("--n_iter", type=int, default=10, help="Number of repetitions")
     parser.add_argument("--output_xlsx", type=str, default="results.csv", help="Path to output CSV")
+    parser.add_argument("--seed", type=int, default=None, help="Seed of the initial random permutation.")
 
     args = parser.parse_args()
     main(
@@ -177,4 +190,5 @@ if __name__ == "__main__":
         args.embeddings_filename,
         args.n_iter,
         args.output_xlsx,
+        args.seed,
     )

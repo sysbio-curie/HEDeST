@@ -12,7 +12,7 @@ Checks (the ones that held for the legacy sim/, plus the cross-dataset ones):
   * perturbed props: rows sum to 1, consistent with (1-s)*p + s*U(0,1) renormalised from the base prop,
     mean change increasing with strength
   * the hardcoded drawn weights are reproduced by draw_imbalanced_weights
-Writes figures/datasets_summary.csv and figures/verification_report.txt; exits 1 on any failure.
+Writes plots/datasets/datasets_summary.csv and plots/datasets/verification_report.txt; exits 1 on any failure.
 """
 from __future__ import annotations
 
@@ -261,11 +261,11 @@ def main() -> None:
             f"{len(seen)} cells, {n_conflicts} conflicts",
         )
 
-    os.makedirs(C.FIG_DIR, exist_ok=True)
-    pd.DataFrame(summary).to_csv(os.path.join(C.FIG_DIR, "datasets_summary.csv"), index=False)
+    os.makedirs(C.DATASET_PLOT_DIR, exist_ok=True)
+    pd.DataFrame(summary).to_csv(os.path.join(C.DATASET_PLOT_DIR, "datasets_summary.csv"), index=False)
     verdict = f"{len(check.failures)} failed checks" if check.failures else "all checks passed"
     check.header(f"\n{verdict} ({time.time() - t0:.0f}s)")
-    with open(os.path.join(C.FIG_DIR, "verification_report.txt"), "w") as f:
+    with open(os.path.join(C.DATASET_PLOT_DIR, "verification_report.txt"), "w") as f:
         f.write("\n".join(check.lines) + "\n")
 
     sys.exit(1 if check.failures else 0)

@@ -8,7 +8,7 @@ Per dataset tag:
   {tag}_emb_dict.pt                  H-Optimus-0 embeddings of those cells
   {tag}_image_dict_64px_20um.pt      64 px / 20 um cell images of those cells
 Duplicated cells are named "<id>-1" and share the embedding / image of <id>.
-Figures (png + svg) in figures/datasets/{tag}/.
+Figures (png + svg) in plots/datasets/{tag}/.
 """
 from __future__ import annotations
 
@@ -45,7 +45,7 @@ def build_dataset(d: dict, cell_ids: np.ndarray, kmeans: dict, emb: dict, image_
     tag = C.dataset_tag(d)
     K = d["K"]
     out = lambda suffix: os.path.join(C.SIM_DIR, f"{tag}_{suffix}")  # noqa: E731
-    fig_dir = os.path.join(C.FIG_DIR, "datasets", tag)
+    fig_dir = os.path.join(C.DATASET_PLOT_DIR, tag)
     log(f"== {tag}")
 
     ids = cell_ids[kmeans["pool_idx"]]

@@ -6,7 +6,7 @@ shared by every dataset with that K, so cluster numbers mean the same thing acro
 
 Cached in sim/construction/ (reused on reruns, --force recomputes):
   cell_ids.npy, kmeans_K{K}.npz, umap.npy, centroids_xy.npy, clusters_summary.csv
-Figures (png + svg) in figures/construction/K{K}/.
+Figures (png + svg) in plots/construction/K{K}/.
 """
 from __future__ import annotations
 
@@ -138,7 +138,7 @@ def main() -> None:
 
     for K, r in results.items():
         t0 = time.time()
-        out = os.path.join(C.FIG_DIR, "construction", f"K{K}")
+        out = os.path.join(C.CONSTRUCTION_PLOT_DIR, f"K{K}")
         labels, pool_idx, pool_labels = r["labels"], r["pool_idx"], r["pool_labels"]
         pool_mask = np.zeros(len(cell_ids), dtype=bool)
         pool_mask[pool_idx] = True
