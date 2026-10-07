@@ -23,7 +23,7 @@ models
 review
 simulations/full_simulations/logs
 simulations/full_simulations/plots
-simulations/semi_simulations/figures
+simulations/semi_simulations/STHELAR/matches
 
 debug.log
 run_*
