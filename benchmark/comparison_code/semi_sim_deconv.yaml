@@ -1,0 +1,76 @@
+# HEDeST on the STHELAR samples with the DECONVOLUTION-DERIVED proportions.
+#
+# Same engine, same ground truth and same fixed parameters as gridsearch/semi_sim.yaml, so
+# the runs are directly comparable with the ground-truth-proportion ones already in
+# models/gridsearch_semi_sim/. Two things differ:
+#   * `proportions` points at the deconvolution output (benchmark/results/PanoSpace/deconv/),
+#     which is what HistoCell and PanoSpace were given in their "endecon" configuration;
+#   * `spot_dict` points at the dictionaries restricted to the spots the deconvolution
+#     actually estimated (prepare_deconv.py); 1.7% of spots have no estimate.
+# The grid is pinned to the single default combination, so this is a run, not a search.
+#
+#   python benchmark/comparison_code/prepare_deconv.py      # the spot dicts
+#   python gridsearch/gridsearch.py check  benchmark/comparison_code/semi_sim_deconv.yaml
+#   sbatch benchmark/comparison_code/run_hedest_deconv.sh   # 27 units x 3 seeds
+#   python gridsearch/gridsearch.py collect benchmark/comparison_code/semi_sim_deconv.yaml
+#
+# Relative paths are relative to this file.
+
+# Relative paths here are resolved against THIS file's directory (gridsearch.py:146),
+# so they are two levels below the repo root now that this config lives in
+# benchmark/comparison_code/.
+out_dir: ../../models/STHELAR_semi_sim_from_deconv
+results_dir: ../results/comparison/hedest_deconv
+plots_dir: ../results/comparison/plots/_engine   # the engine's own figures; the comparison figures are plots.py's
+
+# One combination: the HEDeST defaults (the gridsearch optimum on H-Optimus-0).
+grid:
+  norm: [true]
+  dropout: [0.0]
+  alpha: [0.01]
+  lr: [0.0001]
+  divergence: [l2]
+  hidden_dims: [[1024, 512]]
+
+fixed:
+  batch_size: 64
+  beta: 0.0
+  adjustment: interpolated
+  gated: false
+  epochs: 100
+  train_size: 0.8
+  val_size: 0.1
+
+seeds: [0, 1, 2]
+
+predictions: float16
+
+plots:
+  class_bins: [[2, 3], [4, 5], [6, 7], [8, 9], [10, 12]]
+  select: raw
+
+templates:
+  sthelar_deconv: &sthelar_deconv
+    group: STHELAR
+    root: /cluster/CBIO/data1/lgortana/STHELAR/bench_data/{name}
+    features:
+      hoptimus0: "{root}/hoptimus_tile_embed_bench_{name}.pt"
+    proportions: /cluster/CBIO/home/lgortana/HEDeST/benchmark/results/PanoSpace/deconv/{name}/{level}/proportions.csv
+    spot_dict: /cluster/CBIO/home/lgortana/HEDeST/benchmark/results/comparison/deconv_inputs/spot_dict_{name}_{level}.json
+    adata: "{root}/pseudovisium.h5ad"
+    adata_name: "{name}"
+    segmentation: "{root}/hovernet.json"
+    ground_truth:
+      path: /cluster/CBIO/home/lgortana/HEDeST/simulations/semi_simulations/STHELAR/matches/gt_{name}_{level}.json
+      key: gt
+
+# Only the sample-levels the deconvolution produced: no lymph_node_s0, and the finest
+# levels of breast_s6, cervix_s0_0, ovary_s1, prostate_s0 and skin_s4 are missing.
+datasets:
+  - {<<: *sthelar_deconv, name: breast_s6, levels: [level0, level1, level2]}
+  - {<<: *sthelar_deconv, name: cervix_s0_0, levels: [level0, level1, level2, level3]}
+  - {<<: *sthelar_deconv, name: cervix_s0_1, levels: [level0, level1, level2, level3]}
+  - {<<: *sthelar_deconv, name: lung_s3, levels: [level0, level1, level2, level3, level4]}
+  - {<<: *sthelar_deconv, name: ovary_s1, levels: [level0, level1, level2, level3]}
+  - {<<: *sthelar_deconv, name: prostate_s0, levels: [level0, level1, level2, level3]}
+  - {<<: *sthelar_deconv, name: skin_s4, levels: [level0, level1, level2]}

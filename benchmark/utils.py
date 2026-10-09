@@ -1,59 +1,14 @@
-from __future__ import annotations
+"""Shared plotting / statistics helpers for the benchmark scripts.
 
-import os
+Trimmed to what the benchmark code actually imports (``mhast_benchmark.py``);
+the notebook-only helpers went with the notebooks.
+"""
+from __future__ import annotations
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns
-from openpyxl import load_workbook
-
-
-def box_plot_perf(
-    file_infos: list[tuple[str, str, str]], level: str = "cells", title: str = "", savefig: str = None
-) -> None:
-    """
-    Creates a box plot comparing performance metrics across multiple models.
-
-    Args:
-    - file_infos: List of tuples in the form (file_path, sheet_name, model_name)
-    - level: 'cells' or 'slide', determines which metrics to plot
-    - title: Plot title
-    - savefig: Path to save figure, if desired
-    """
-
-    if level == "cells":
-        metrics = ["Global Accuracy", "Balanced Accuracy", "Weighted F1 Score", "Weighted Precision", "Weighted Recall"]
-    elif level == "slide":
-        metrics = [
-            "Pearson Correlation global",
-            "Spearman Correlation global",
-        ]
-    else:
-        raise ValueError("Level must be either 'cells' or 'slide'.")
-
-    df_list = []
-    for file_path, sheet_name, model_name in file_infos:
-        df = pd.read_excel(file_path, sheet_name=sheet_name)
-        df["Model"] = model_name
-        df_list.append(df[metrics + ["Model"]])
-
-    combined_df = pd.concat(df_list, ignore_index=True)
-    melted_df = pd.melt(combined_df, id_vars=["Model"], value_vars=metrics, var_name="Metric", value_name="Value")
-
-    plt.figure(figsize=(12, 6))
-    sns.boxplot(data=melted_df, x="Metric", y="Value", hue="Model")
-    plt.title(title)
-    plt.xlabel("")
-    plt.xticks(rotation=0)
-    plt.tight_layout()
-    plt.grid(True)
-
-    if savefig:
-        plt.savefig(savefig, dpi=300)
-        print(f"Figure saved to {savefig}")
-
-    plt.show()
 
 
 def bar_plot_perf(
@@ -171,110 +126,3 @@ def compute_statistics(metrics_list: list[dict[str, float]]) -> tuple[dict[str, 
     ci_values = {f"{key} ci": 1.96 * se for key, se in se_values.items()}
 
     return mean_values, ci_values
-
-
-def save_metrics_to_excel(metrics_dict: dict[str, float], seed: int, excel_path: str) -> None:
-    """
-    Saves per-run metrics to an Excel file and maintain an aggregated summary sheet.
-
-    Args:
-        metrics_dict:
-            Dictionary containing metrics for the current run.
-            Keys are metric names and values are numeric results.
-        seed:
-            Random seed identifier for the run. This will be added as a separate
-            column in the per-run sheet.
-        excel_path:
-            Path to the Excel file where results should be stored. If the file
-            exists, it will be overwritten with updated sheets.
-    """
-
-    new_row = {"seed": seed, **metrics_dict}
-
-    if os.path.exists(excel_path):
-        # Load existing Excel file
-        _ = load_workbook(excel_path)
-        per_run_df = pd.read_excel(excel_path, sheet_name="per_run")
-        per_run_df = pd.concat([per_run_df, pd.DataFrame([new_row])], ignore_index=True)
-
-        # Compute summary
-        metric_keys = [k for k in new_row.keys() if k != "seed"]
-        metric_dicts = per_run_df[metric_keys].to_dict(orient="records")
-        mean_vals, ci_vals = compute_statistics(metric_dicts)
-
-        summary_row = {**mean_vals, **ci_vals}
-        summary_df = pd.DataFrame([summary_row])
-
-        with pd.ExcelWriter(excel_path, engine="openpyxl", mode="w") as writer:
-            # Ensure summary is first sheet
-            summary_df.to_excel(writer, sheet_name="summary", index=False)
-            per_run_df.to_excel(writer, sheet_name="per_run", index=False)
-    else:
-        # Create new Excel file
-        per_run_df = pd.DataFrame([new_row])
-        metric_keys = [k for k in new_row.keys() if k != "seed"]
-        metric_dicts = per_run_df[metric_keys].to_dict(orient="records")
-        mean_vals, ci_vals = compute_statistics(metric_dicts)
-        summary_row = {**mean_vals, **ci_vals}
-        summary_df = pd.DataFrame([summary_row])
-
-        with pd.ExcelWriter(excel_path, engine="openpyxl") as writer:
-            summary_df.to_excel(writer, sheet_name="summary", index=False)
-            per_run_df.to_excel(writer, sheet_name="per_run", index=False)
-
-
-def plot_probability_histograms_with_uncertainty(preds: list[pd.DataFrame], ct_list: list[str]) -> None:
-    """
-    Plots histogram distributions of predicted probabilities with uncertainty bands.
-
-    Args:
-        preds:
-            A list where each element is a DataFrame containing predicted
-            probabilities. Each DataFrame must have a column for every cell type
-            listed in `ct_list`.
-        ct_list:
-            List of cell-type (or class) names to visualize. Each name must match
-            a column in each DataFrame in `preds`.
-    """
-
-    bin_edges = np.linspace(0, 1, 21)  # 20 bins: 0.0–0.05, ..., 0.95–1.0
-    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
-
-    plt.figure(figsize=(18, 15))
-
-    global_max = 0
-    binned_per_ctype = []
-
-    for ctype in ct_list:
-        binned_counts = [np.histogram(df[ctype].values, bins=bin_edges)[0] for df in preds]
-        binned_counts = np.array(binned_counts)
-        binned_per_ctype.append(binned_counts)
-        # global_max = max(global_max, (binned_counts.mean(axis=0) + binned_counts.std(axis=0)).max())
-        global_max = 2000
-
-    for i, ctype in enumerate(ct_list):
-        binned_counts = binned_per_ctype[i]
-        mean_counts = np.array(binned_counts).mean(axis=0)
-        std_counts = np.array(binned_counts).std(axis=0)
-
-        ax = plt.subplot(3, 3, i + 1)
-        ax.bar(
-            bin_centers,
-            mean_counts,
-            width=0.051,
-            align="center",
-            alpha=0.7,
-            color="steelblue",
-            yerr=std_counts,
-            capsize=4,
-        )
-        ax.set_title(f"{ctype}", fontsize=14)
-        ax.set_xlabel("Predicted Probability")
-        if i == 0:
-            ax.set_ylabel("Count")
-        ax.grid(True)
-        ax.set_ylim(0, global_max * 1.1)
-
-    plt.suptitle("Probability Distributions", fontsize=16)
-    plt.tight_layout(rect=[0, 0, 1, 0.95])
-    plt.show()
