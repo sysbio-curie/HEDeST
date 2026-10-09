@@ -10,8 +10,20 @@ from __future__ import annotations
 
 import glob
 import os
+import sys
 
 import pandas as pd
+
+sys.path.insert(
+    0,
+    os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        "simulations",
+        "semi_simulations",
+        "STHELAR",
+    ),
+)
+import palette as _palette  # noqa: E402  (needs the path above first)
 
 BENCH = "/cluster/CBIO/data1/lgortana/STHELAR/bench_data"
 
@@ -28,17 +40,12 @@ def levels_of(sample):
 
 
 def children(coarse, fine, tol=1e-6):
-    """``{coarse class: [fine classes it contains]}`` from the proportions."""
-    spots = coarse.index.intersection(fine.index)
-    C, F = coarse.loc[spots], fine.loc[spots]
-    out = {c: [] for c in coarse.columns}
-    for leaf in fine.columns:
-        f = F[leaf].to_numpy()
-        cand = {
-            c: float((C[c].to_numpy() - f).sum()) for c in coarse.columns if bool(((C[c].to_numpy() - f) >= -tol).all())
-        }
-        out[min(cand, key=cand.get)].append(leaf)
-    return out
+    """``{coarse class: [fine classes it contains]}`` from the proportions.
+
+    The nesting is implemented once, beside the data it describes, because the cell-type
+    colour code is built on it; this re-exports it so the callers here are unchanged.
+    """
+    return _palette.children(coarse, fine, tol=tol)
 
 
 def parent_map(sample, coarse_level, fine_level):

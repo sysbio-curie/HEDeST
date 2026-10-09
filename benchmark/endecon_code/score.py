@@ -15,22 +15,20 @@ Figures, identical in style to every run in benchmark/results/PanoSpace/deconv:
                                   position: ground truth left, EnDecon right
   deconv_vs_truth.png             per-cell-type scatter against the truth
 
-Colours are the benchmark's hierarchical code -- level-0 categories are colour
-families (Epithelial blue, Immune green, Structural orange, Melanocyte purple),
-finer types are shades within their family, and an intermediate category is the
-mean colour of its leaves. The family/leaf grouping is *derived from the
-proportions files themselves*: annotation levels are nested, so a coarse class
-equals the sum of its children spot by spot, which makes the tree recoverable
-without any hierarchy table to keep in sync. Verified against the recorded
-palette.json: 56/56 colours identical.
+Colours come from `simulations/semi_simulations/STHELAR/palette.py`, the single
+definition of the STHELAR colour code for the whole repository: level-0
+categories are colour families (Epithelial blue, Immune green, Structural
+orange, Melanocyte purple), finer types are shades within their family, and an
+intermediate category is the mean colour of its leaves. The family/leaf grouping
+is derived from the proportions files themselves, so there is no hierarchy table
+to keep in sync. Verified against the recorded palette.json: 56/56 colours
+identical.
 
     python score.py --sample lung_s3 --level 3 --run-dir <dir> --out-dir <dir>
 """
 from __future__ import annotations
 
 import argparse
-import colorsys
-import glob
 import json
 import os
 import sys
@@ -47,52 +45,20 @@ from matplotlib.patches import Wedge, Patch
 from matplotlib.collections import PatchCollection
 from scipy.spatial import cKDTree
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from hierarchy import BENCH, children as _children
+HERE = os.path.dirname(os.path.abspath(__file__))  # benchmark/endecon_code
+REPO = os.path.dirname(os.path.dirname(HERE))
 
-_FAM = {"Epithelial": 0.60, "Immune": 0.33, "Structural": 0.075, "Melanocyte": 0.80}
-_BAND, _NREF, _LLO, _LHI, _ZIG, _CLAMP, _SAT = 0.18, 6, 0.34, 0.72, 0.13, (0.26, 0.80), 0.66
+sys.path.insert(0, HERE)
+from hierarchy import BENCH
 
-
-def _family_hue(cats):
-    hues, free = {}, [c for c in cats if c not in _FAM]
-    taken = [_FAM[c] for c in cats if c in _FAM]
-    for i, c in enumerate(free):
-        h = (i / max(1, len(free))) % 1.0
-        while any(abs(h - t) < 0.06 for t in taken):
-            h = (h + 0.07) % 1.0
-        taken.append(h)
-        hues[c] = h
-    for c in cats:
-        if c in _FAM:
-            hues[c] = _FAM[c]
-    return hues
-
-
-def _leaf_hls(h0, i, n):
-    if n == 1:
-        return h0 % 1.0, (_LLO + _LHI) / 2.0, _SAT
-    t = i / (n - 1)
-    band = _BAND * min(1.0, (n - 1) / (_NREF - 1))
-    light = min(max(_LLO + (_LHI - _LLO) * t + (_ZIG if i % 2 == 0 else -_ZIG), _CLAMP[0]), _CLAMP[1])
-    return (h0 + band * (t - 0.5)) % 1.0, light, _SAT
+# The colour code is defined once for the whole repository, beside the data it describes.
+sys.path.insert(0, os.path.join(REPO, "simulations", "semi_simulations", "STHELAR"))
+from palette import level_palette  # noqa: E402  (needs the path above first)
 
 
 def palette(sample, level):
-    sim = f"{BENCH}/{sample}/sim"
-    lv = sorted(
-        int(os.path.basename(d)[5:]) for d in glob.glob(sim + "/level*") if os.path.exists(d + "/proportions.csv")
-    )
-    rd = lambda k: pd.read_csv(f"{sim}/level{k}/proportions.csv", index_col=0).rename(index=str)
-    fine = rd(lv[-1])
-    fams = _children(rd(lv[0]), fine)
-    hue = _family_hue(list(fams))
-    leaf = {}
-    for fam, leaves in fams.items():
-        for i, lf in enumerate(leaves):
-            leaf[lf] = colorsys.hls_to_rgb(*_leaf_hls(hue[fam], i, len(leaves)))
-    members = {c: [c] for c in fine.columns} if level == lv[-1] else _children(rd(level), fine)
-    return {c: tuple(sum(leaf[m][k] for m in v) / len(v) for k in range(3)) for c, v in members.items()}
+    """``{cell type: (r, g, b)}`` for one sample-level (see STHELAR/palette.py)."""
+    return level_palette(sample, level, bench_root=BENCH)
 
 
 def thumbnail(sample):

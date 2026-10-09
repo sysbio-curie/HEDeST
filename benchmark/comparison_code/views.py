@@ -1,8 +1,9 @@
 """Tissue views: the same cells typed by the ground truth and by each method, side by side.
 
 Three kinds of figure, all five columns wide (ground truth, HistoCell, PanoSpace, HEDeST,
-HEDeST + PPSA) and all coloured with the HEDeST-bench palette, so a colour means the same
-cell type here, across levels, and in every other STHELAR figure:
+HEDeST + PPSA) and all coloured with the STHELAR palette
+(``simulations/semi_simulations/STHELAR/palette.py``), so a colour means the same cell type
+here, across levels, and in every other STHELAR figure:
 
     crops/featured           the windows of ``config.CROP_WINDOWS``, one row each
     crops/{sample}_{level}   the sample's windows at one level, one row each

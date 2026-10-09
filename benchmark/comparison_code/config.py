@@ -32,14 +32,10 @@ BENCH_ROOT = "/cluster/CBIO/data1/lgortana/STHELAR/bench_data"
 BENCHMARK_DIR = os.path.join(REPO, "benchmark", "results")
 DECONV_PROP_DIR = os.path.join(BENCHMARK_DIR, "PanoSpace", "deconv")
 
-# The cell-type colours of HEDeST-bench, which STHELAR is coloured with everywhere else:
-# one hue family per level-0 category (Epithelial blue, Immune green, Structural orange,
-# Melanocyte purple), leaves spread within their family, and a category drawn in the mean
-# colour of its leaves — so a cell type keeps its colour across levels and across figures.
-BENCH_SRC = "/cluster/CBIO/home/lgortana/HEDeST-bench/src"
-
-# The ground truth is produced on the simulation side and only read here.
-MATCH_DIR = os.path.join(REPO, "simulations", "semi_simulations", "STHELAR", "matches")
+# The ground truth is produced on the simulation side and only read here, as is the cell-type
+# colour code (STHELAR_DIR/palette.py, the repository's single definition).
+STHELAR_DIR = os.path.join(REPO, "simulations", "semi_simulations", "STHELAR")
+MATCH_DIR = os.path.join(STHELAR_DIR, "matches")
 
 # Everything this study writes, under benchmark/results/comparison/ (as results/MHAST/).
 OUT_DIR = os.path.join(BENCHMARK_DIR, "comparison")
@@ -195,6 +191,121 @@ def competitor_dir(method: str, sample: str, level: str, config: str, seed: int)
     return os.path.join(BENCHMARK_DIR, method, sample, level, folder, f"seed{seed}")
 
 
+# ----------------------------------------------------------------------------------------
+# Comparison against the segmentation methods (segmentation_*.py)
+# ----------------------------------------------------------------------------------------
+# HoVerNet and CellViT type every nucleus they segment, with the PanNuke classes, without
+# being given any spot proportions. At level 0 the STHELAR annotation is the same three broad
+# categories under other names, so the two segmentations can be read as cell-typing methods
+# and put next to the three that do need proportions. This is a separate study: it is level 0
+# only, three classes only, and on its own cell set, so its numbers are not comparable with
+# the ones in ``summary_{config}.csv``.
+#
+# ``skin_s4`` is left out: its level 0 carries a fourth category, Melanocyte, which PanNuke
+# has no class for.
+SEG_DIR = os.path.join(OUT_DIR, "segmentation")
+SEG_MATCH_DIR = os.path.join(SEG_DIR, "matches")  # CellViT <-> HoVerNet pairs
+SEG_PLOT_DIR = os.path.join(SEG_DIR, "plots")
+SEG_LEVEL = "level0"
+SEG_SAMPLES = [s for s in SAMPLES if s != "skin_s4"]
+
+# PanNuke -> the level 0 categories. Both epithelial classes map to Epithelial: ``neopla`` is
+# neoplastic and ``no-neo`` non-neoplastic epithelium, a distinction the STHELAR annotation
+# does not make at level 0. ``nolabe`` (no label) and ``necros`` (dead) have no counterpart
+# and their cells are dropped.
+PANNUKE_TO_BROAD = {
+    "neopla": "Epithelial",
+    "no-neo": "Epithelial",
+    "inflam": "Immune",
+    "connec": "Structural",
+}
+DROPPED_PANNUKE = ["nolabe", "necros"]
+BROAD_TYPES = ["Epithelial", "Immune", "Structural"]
+
+# The five methods of this study. The proportion-based three keep the colours they have
+# everywhere else; the two segmentations get a purple family of their own, since blue is
+# HEDeST's. Only the raw HEDeST output is used here, and it takes the strong blue because it
+# is the only HEDeST variant on the figures.
+SEG_METHODS = {
+    "HoVerNet": "#9e9ac8",
+    "CellViT": "#54278f",
+    "HistoCell": METHODS["HistoCell"],
+    "PanoSpace": METHODS["PanoSpace"],
+    "HEDeST": METHODS["HEDeST + PPSA"],
+}
+SEG_SEGMENTERS = ["HoVerNet", "CellViT"]  # deterministic: one run, no seeds
+SEG_PROPORTION_METHODS = ["HistoCell", "PanoSpace", "HEDeST"]  # the ones given spot proportions
+
+
+def seg_units(config: str) -> List[str]:
+    """
+    The samples the segmentation comparison can run on, for one configuration.
+
+    Args:
+        config: ``"gt"`` or ``"deconv"``.
+
+    Returns:
+        The sample names, in ``SEG_SAMPLES`` order.
+    """
+
+    if config not in CONFIGS:
+        raise ValueError(f"config must be one of {list(CONFIGS)}, got {config!r}")
+
+    if config == "gt":
+        return list(SEG_SAMPLES)
+
+    return [s for s in SEG_SAMPLES if os.path.exists(proportions_path(s, SEG_LEVEL, "deconv"))]
+
+
+def segmentation_json(sample: str, backend: str) -> str:
+    """
+    One of the two segmentations of a sample.
+
+    Args:
+        sample: The sample name.
+        backend: ``"hovernet"`` or ``"cellvit"``.
+
+    Returns:
+        The path to the segmentation JSON.
+    """
+
+    if backend not in ("hovernet", "cellvit"):
+        raise ValueError(f"backend must be 'hovernet' or 'cellvit', got {backend!r}")
+
+    return os.path.join(BENCH_ROOT, sample, f"{backend}.json")
+
+
+def seg_pairs_path(sample: str) -> str:
+    """
+    The CellViT <-> HoVerNet pairs of a sample, with the PanNuke type of both.
+
+    Args:
+        sample: The sample name.
+
+    Returns:
+        The path to ``matches_{sample}.csv``.
+    """
+
+    return os.path.join(SEG_MATCH_DIR, f"matches_{sample}.csv")
+
+
+def seg_meta_path(sample: str) -> str:
+    """
+    The nucleus counts and PanNuke histograms written beside a sample's pairs.
+
+    It is written *after* the pairs file, so its presence is what says the matching of a
+    sample finished: a reader that only checks the CSV can catch an array task mid-write.
+
+    Args:
+        sample: The sample name.
+
+    Returns:
+        The path to ``matches_{sample}.meta.json``.
+    """
+
+    return os.path.join(SEG_MATCH_DIR, f"matches_{sample}.meta.json")
+
+
 # Windows of the featured side-by-side figure, in slide coordinates: ((x, y), (w, h)) at
 # level 0. The same windows serve both configurations, so the two figures show the same
 # tissue.
@@ -219,11 +330,14 @@ CROPS_PER_SAMPLE = 3
 
 def bench_palette(sample: str, level: str) -> Dict[str, tuple]:
     """
-    The HEDeST-bench colours of a sample-level: ``{cell type: (r, g, b)}`` in 0-1.
+    The STHELAR colours of a sample-level: ``{cell type: (r, g, b)}`` in 0-1.
+
+    Defined once, beside the data, in ``simulations/semi_simulations/STHELAR/palette.py``;
+    this only adapts the ``"level0"`` spelling the comparison uses to the integer it takes.
 
     Args:
         sample: The sample name.
-        level: The annotation level.
+        level: The annotation level, as ``"level0"``.
 
     Returns:
         One colour per cell type of that level.
@@ -231,8 +345,8 @@ def bench_palette(sample: str, level: str) -> Dict[str, tuple]:
 
     import sys
 
-    if BENCH_SRC not in sys.path:
-        sys.path.insert(0, BENCH_SRC)
-    from hedest_bench.bench import colors as bench_colors
+    if STHELAR_DIR not in sys.path:
+        sys.path.insert(0, STHELAR_DIR)
+    from palette import level_palette
 
-    return bench_colors.level_palette(sample, int(level.removeprefix("level")))
+    return level_palette(sample, int(level.removeprefix("level")), bench_root=BENCH_ROOT)
