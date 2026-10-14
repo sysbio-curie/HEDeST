@@ -1,0 +1,35 @@
+import sys
+
+sys.dont_write_bytecode = True
+from pathlib import Path
+
+STUDY = Path.cwd().resolve().parent
+sys.path.insert(0, str(STUDY))
+
+import warnings
+
+warnings.filterwarnings("ignore")
+%matplotlib inline
+%config InlineBackend.figure_format = "png"
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import seaborn as sns
+from IPython.display import Markdown, display
+
+from lungstudy import cache, paths, views
+from lungstudy.data import SampleData, pick_sites
+
+from loguru import logger  # after hedest, which sets up its own handlers on import
+
+logger.remove()
+logger.add(sys.stderr, level="WARNING")
+plt.rcParams["figure.dpi"] = 80
+pd.set_option("display.width", 200)
+pd.set_option("display.max_columns", 40)
+sns.set_style("whitegrid")
+
+SAMPLES = paths.SAMPLES
+SAMPLE_COLORS = dict(zip(SAMPLES, ["#1b9e77", "#d95f02", "#7570b3", "#7f7f7f"]))
+METHOD_COLORS = {"deconvolution": "#e6ab02", "interpolation": "#e6ab02", "spots": "#e6ab02", "HEDeST": "#1f78b4", "blend": "#6a3d9a", "reference": "#33a02c"}
