@@ -6,7 +6,13 @@
 
 **HEDeST** is a deep-learning framework for assigning cell types to single cells on H&E slides using **deconvoluted spatial transcriptomics** data.
 
-![figure](references/method.png)
+<p align="center">
+  <img src="references/qupath_demo.gif" width="80%" alt="Toggling in QuPath between the spot proportions HEDeST is trained on and the single cells it predicts"/>
+</p>
+
+<p align="center">
+  <em><b>Spot mixtures in, single cells out.</b> One keystroke in QuPath switches between the deconvoluted proportions HEDeST is trained on — one pie per spot — and the cell types it reads out underneath them.</em>
+</p>
 
 ## Installation
 
@@ -81,7 +87,7 @@ requirements-hovernet.txt → hovernet-env (mask, segmentation)
 
 ## Usage
 
-![figure](references/pp_train.png)
+![figure](references/method.png)
 
 To use HEDeST, you need an H&E slide (pyramidal .tif) and a CSV file with the cell-type proportions per spatial transcriptomics spot. Everything else is produced by the pipeline: tissue mask → nuclei segmentation → cell embeddings → cell types.
 
@@ -207,7 +213,7 @@ Then, create a folder named ``Visium_FFPE_Human_Breast_Cancer``. Inside it, make
 
 You can find the proportion file in the **case_study** directory.
 
-After running preprocessing and training, open the notebook ``case_study/DCIS_study.ipynb`` for analysis and visualization. The cell annotations performed by HEDeST can also be visualized in QuPath with the geojson output.
+After running preprocessing and training, open the notebook ``case_study/breast_study/DCIS_study.ipynb`` for analysis and visualization. The cell annotations performed by HEDeST can also be visualized in QuPath with the geojson output.
 
 ## Gridsearch
 
