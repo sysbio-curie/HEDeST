@@ -1,13 +1,21 @@
 cache
+logs
 __pycache*
 *.svg
+*.geojson
+*.sbatch
+*.pdf
 *.md
 !README.md
 
 benchmark/results
 benchmark/annotation_code
 benchmark/endecon_code/reproduce.sh
-case_study/figures
+case_study/breast_study/figures
+case_study/lung_study/figures
+case_study/lung_study/notebooks/*.ipynb
+case_study/lung_study/qupath
+case_study/lung_study/results
 external/CellViT/docs
 external/CellViT/examples
 external/HistoCell-v0
@@ -17,13 +25,11 @@ gridsearch/plots
 gridsearch/results
 gridsearch/semi_sim*
 log
-logs
 models
-*.pdf
 review
-simulations/full_simulations/logs
 simulations/full_simulations/plots
 simulations/semi_simulations/STHELAR/matches
+simulations/semi_simulations/Xenium/figures
 
 debug.log
 run_*
