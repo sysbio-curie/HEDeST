@@ -1,0 +1,117 @@
+# HEDeST on the Visium HD colon samples: what does the supervision signal cost?
+#
+# One combination, ten seeds, three annotation levels, and the same cells and labels
+# throughout. The only thing that changes between datasets is the spot proportions HEDeST is
+# trained on:
+#
+#   *_gt         the sample's own proportions, as in gridsearch/semi_sim.yaml
+#   *_deconv     the cell2location proportions from ../deconv_results
+#   *_perturb<s> the sample's own proportions mixed with uniform noise at strength s, the
+#                perturbation of simulations/full_simulations (written by perturb.py)
+#
+# so a difference in balanced accuracy is attributable to the proportions alone. The
+# perturbed arms give the accuracy-versus-perturbation curve on these samples, which is what
+# places the deconvolution on the perturbation axis.
+#
+#   python hedest_code/perturb.py                                          # the perturbed proportions
+#   python ../../../gridsearch/gridsearch.py check hedest_code/visiumhd.yaml
+#   sbatch hedest_code/hedest_array.sh                                     # train
+#   python ../../../gridsearch/gridsearch.py collect hedest_code/visiumhd.yaml
+#   python hedest_code/plots.py                                            # figures
+#
+# Relative paths are relative to this file.
+
+out_dir: ../hedest_models        # {feature}/{dataset}/{level}/{combination}/seed_{seed}/
+results_dir: ../hedest_results   # runs.csv
+plots_dir: ../figures/hedest     # beside figures/deconv, which ../deconv_code writes
+
+# The combination the gridsearch elected for hoptimus0 (best mean rank over every dataset,
+# ranked without PPSA). Listing one value per key trains exactly it; the key order is what
+# names the folder, so it comes out as norm1_do0_a0.01_lr0.0001_l2_hd1024-512 — the same name
+# the gridsearch used, which is what makes the two studies' numbers comparable.
+grid:
+  norm: [true]
+  dropout: [0.0]
+  alpha: [0.01]
+  lr: [0.0001]
+  divergence: [l2]
+  hidden_dims: [[1024, 512]]
+
+fixed:
+  batch_size: 64
+  beta: 0.0
+  adjustment: interpolated
+  gated: false
+  epochs: 100
+  train_size: 0.8
+  val_size: 0.1
+
+# Seeds 0-2 are the gridsearch's own, so the `_gt` arms must reproduce its numbers exactly.
+seeds: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+
+# Needed: the per-cell predictions are what the slide figures draw.
+predictions: float16
+
+plots:
+  class_bins: [[2, 3], [4, 5], [6, 7], [8, 9], [10, 12]]
+  combination: {hoptimus0: norm1_do0_a0.01_lr0.0001_l2_hd1024-512}
+
+# `supervision` and `code` are not read by the engine; plots.py and equivalence.py use them
+# so that neither has to parse a dataset name.
+templates:
+  visiumhd: &visiumhd
+    root: /cluster/CBIO/data1/lgortana/Visium_HD_Human_Colon_Cancer_{code}/pseudovisium
+    levels: [lv0, lv1, lv2]
+    features:
+      hoptimus0: "{root}/hoptimus_tile_embed.pt"
+    spot_dict: "{root}/spot_dict.json"
+    adata: "{root}/pseudovisium.h5ad"
+    adata_name: Visium_HD_Human_Colon_Cancer_{code}
+    segmentation: "{root}/hovernet.json"
+    # The labels never change: only the proportions above them do.
+    ground_truth:
+      path: "{root}/sim/cell_types.csv"
+      index_col: cell_id
+      column: "{level}"
+
+  gt: &gt
+    <<: *visiumhd
+    group: gt
+    supervision: gt
+    proportions: "{root}/sim/proportions_{level}.csv"
+
+  deconv: &deconv
+    <<: *visiumhd
+    group: deconv
+    supervision: deconv
+    proportions: /cluster/CBIO/home/lgortana/HEDeST/simulations/semi_simulations/VisiumHD/deconv_results/proportions_{code}_{level}.csv
+
+  perturb: &perturb
+    <<: *visiumhd
+    group: perturb
+    supervision: perturb
+    proportions: /cluster/CBIO/home/lgortana/HEDeST/simulations/semi_simulations/VisiumHD/perturbed_proportions/proportions_{code}_s{strength}_{level}.csv
+
+# Ordered so that the two arms the study is about are the first units: a truncated run still
+# leaves the gt-versus-deconv comparison complete.
+datasets:
+  - {<<: *gt, name: P1_gt, code: P1}
+  - {<<: *gt, name: P2_gt, code: P2}
+  - {<<: *gt, name: P5_gt, code: P5}
+
+  - {<<: *deconv, name: P1_deconv, code: P1}
+  - {<<: *deconv, name: P2_deconv, code: P2}
+  - {<<: *deconv, name: P5_deconv, code: P5}
+
+  - {<<: *perturb, name: P1_perturb0.05, code: P1, strength: 0.05}
+  - {<<: *perturb, name: P1_perturb0.1, code: P1, strength: 0.1}
+  - {<<: *perturb, name: P1_perturb0.25, code: P1, strength: 0.25}
+  - {<<: *perturb, name: P1_perturb0.5, code: P1, strength: 0.5}
+  - {<<: *perturb, name: P2_perturb0.05, code: P2, strength: 0.05}
+  - {<<: *perturb, name: P2_perturb0.1, code: P2, strength: 0.1}
+  - {<<: *perturb, name: P2_perturb0.25, code: P2, strength: 0.25}
+  - {<<: *perturb, name: P2_perturb0.5, code: P2, strength: 0.5}
+  - {<<: *perturb, name: P5_perturb0.05, code: P5, strength: 0.05}
+  - {<<: *perturb, name: P5_perturb0.1, code: P5, strength: 0.1}
+  - {<<: *perturb, name: P5_perturb0.25, code: P5, strength: 0.25}
+  - {<<: *perturb, name: P5_perturb0.5, code: P5, strength: 0.5}
