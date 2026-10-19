@@ -30,7 +30,6 @@ models
 review
 simulations/full_simulations/plots
 simulations/semi_simulations/STHELAR/matches
-!simulations/semi_simulations/VisiumHD/deconv_code/run_c2l.py
 simulations/semi_simulations/VisiumHD/deconv_results
 simulations/semi_simulations/VisiumHD/figures
 simulations/semi_simulations/VisiumHD/hedest_models
@@ -49,6 +48,7 @@ run_*
 !run_tile.sh
 !run_train.py
 !run_wsi.sh
+!run_c2l.py
 !run_lemon.py
 !run_tangram.py
 !run_moco.py
