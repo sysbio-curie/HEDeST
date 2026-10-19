@@ -1,0 +1,182 @@
+# How the single-cell reference is reshaped onto our annotation vocabularies.
+#
+# The reference carries the Flex atlas's own `Level2` labels (38 types). Our Visium HD samples carry
+# three nested annotation levels, named lv0/lv1/lv2 after `sim/proportions_lv<k>.csv` and backed
+# by the obs columns lv1_annot/lv2_annot/lv3_annot respectively. The vocabularies differ per
+# sample, so the reshaping does too.
+#
+# `groups` folds the 38 `Level2` types into 17 lineage groups; `samples` then sends each group to
+# a label at each level, or drops it when that level has nowhere to put it. Dropping is not a
+# default: it means the sample's annotation offers no label for that lineage, so a reference
+# containing it could only mislead the deconvolution. Everything dropped stays available in
+# `reference_full.h5ad`, which keeps the untouched `Level2` labels.
+#
+# `build_reference.py` checks that the labels used here are exactly the ones in each sample's
+# `sim/levels.json`, so an edit that invents or misspells a label fails the build.
+
+# -------------------------------------------------------------------- the 38 atlas types, folded
+
+groups:
+  tumor: [Tumor I, Tumor II, Tumor III, Tumor IV, Tumor V]
+  goblet: [Goblet]
+  # The samples' own `Goblet` clusters carry colonocyte markers (CA2, FABP1) next to the goblet
+  # ones, so absorptive epithelium belongs with them rather than apart.
+  enterocyte: [Enterocyte, Epithelial, Tuft]
+  neuroendocrine: [Neuroendocrine]
+  fibroblast: [Fibroblast, CAF, Myofibroblast, Vascular Fibroblast, Proliferating Fibroblast]
+  smooth_muscle: [Smooth Muscle, SM Stress Response, vSM, Pericytes, Unknown III (SM)]
+  endothelial: [Endothelial]
+  lymphatic: [Lymphatic Endothelial]
+  plasma: [Plasma]
+  b_cell: [Mature B, Memory B]
+  t_nk: [CD4 T cell, CD8 T cell, NK]
+  # No sample resolves dendritic cells apart from macrophages, and at 55 um both are mononuclear
+  # phagocytes in the same spot.
+  macrophage: [Macrophage, Proliferating Macrophages, cDC I, pDC, mRegDC]
+  neutrophil: [Neutrophil]
+  mast: [Mast]
+  glial: [Enteric Glial]
+  # Dropped everywhere: 49% of `Proliferating Immune II` sits under Level1 `B cells` and the rest
+  # is spread over other lineages, so it has no single home; 49 adipocytes is too few to model.
+  ambiguous: [Proliferating Immune II]
+  adipocyte: [Adipocyte]
+
+# --------------------------------------------------------- two labels the reference cannot supply
+
+# Neither label exists in the atlas's `Level2`, so each is carved out of the reference by the
+# marker evidence that defines it. `fraction` is the share of the parent population to relabel,
+# taken from the prevalence the sample's own annotation found.
+derived:
+  Paneth cell:
+    sample: P1
+    # Paneth-cell metaplasia: DEFA5/DEFA6 are small-intestinal defensins not normally seen in
+    # colon, and their appearance in CRC/IBD is a recognised finding.
+    from_groups: [goblet, enterocyte]
+    markers: [DEFA5, DEFA6, REG1A, REG1B, OLFM4, DMBT1]
+    required: [DEFA5, DEFA6] # a cell needs real defensin signal, not just the regenerative genes
+    fraction: 0.0709 # 2000 / 28216 of the sample's retained intestinal epithelium (Goblet+Paneth)
+    levels: {lv0: Epithelial, lv1: Intestinal Epithelial, lv2: Paneth cell}
+  Tumor Epithelial Inflamed:
+    sample: P2
+    # A hypoxic, immune-interacting tumour niche: hypoxia (NDRG1/PLOD2/VEGFA) with interferon
+    # (TAP1/CFB/WARS) and chemokine (CCL20/CXCL1) programmes. P1's annotation resolves no such
+    # niche, which is why this is P2 only.
+    from_groups: [tumor]
+    markers: [NDRG1, PLOD2, VEGFA, TAP1, CFB, WARS, CCL20, CXCL1, PI3, SOD2]
+    fraction: 0.1332 # 22982 / 172511 of the sample's tumour epithelium
+    levels: {lv0: Epithelial, lv1: Tumor Epithelial, lv2: Tumor Epithelial Inflamed}
+
+# ------------------------------------------------------------------------ group -> label, by level
+
+samples:
+
+  # lv0 3 types | lv1 6 types | lv2 12 types. `Vascular` is not split: this sample's annotation
+  # resolves no lymphatic subcluster. lv2 has no intestinal-epithelial label beyond Goblet
+  # and Paneth (lv2 `Epithelial` was removed as unassigned), and no neuronal label at any level.
+  P1:
+    tumor: {lv0: Epithelial, lv1: Tumor Epithelial, lv2: Tumor Epithelial}
+    goblet: {lv0: Epithelial, lv1: Intestinal Epithelial, lv2: Goblet}
+    enterocyte: {lv0: Epithelial, lv1: Intestinal Epithelial, lv2: Goblet}
+    neuroendocrine: {lv0: Epithelial, lv1: Intestinal Epithelial, lv2: drop}
+    fibroblast: {lv0: Stromal, lv1: Stromal, lv2: Fibroblast}
+    smooth_muscle: {lv0: Stromal, lv1: Stromal, lv2: Smooth Muscle}
+    endothelial: {lv0: Stromal, lv1: Vascular, lv2: Vascular}
+    lymphatic: {lv0: Stromal, lv1: Vascular, lv2: Vascular}
+    plasma: {lv0: Immune, lv1: Lymphoid, lv2: Plasma cell}
+    b_cell: {lv0: Immune, lv1: Lymphoid, lv2: B cell}
+    t_nk: {lv0: Immune, lv1: Lymphoid, lv2: T cell / NK cell}
+    macrophage: {lv0: Immune, lv1: Myeloid, lv2: Macrophage}
+    neutrophil: {lv0: Immune, lv1: Myeloid, lv2: Neutrophil}
+    mast: {lv0: Immune, lv1: Myeloid, lv2: Mast cell}
+    glial: {lv0: Stromal, lv1: drop, lv2: drop}
+    ambiguous: {lv0: drop, lv1: drop, lv2: drop}
+    adipocyte: {lv0: drop, lv1: drop, lv2: drop}
+
+  # lv0 3 types | lv1 6 types | lv2 10 types. The only lymphoid label at lv2 is `Plasma cell`, so
+  # T/NK and B cells have no home there; likewise mast cells among the myeloid labels.
+  P2:
+    tumor: {lv0: Epithelial, lv1: Tumor Epithelial, lv2: Tumor Epithelial}
+    goblet: {lv0: Epithelial, lv1: Intestinal Epithelial, lv2: Goblet}
+    enterocyte: {lv0: Epithelial, lv1: Intestinal Epithelial, lv2: Goblet}
+    neuroendocrine: {lv0: Epithelial, lv1: Intestinal Epithelial, lv2: drop}
+    fibroblast: {lv0: Stromal, lv1: Stromal, lv2: Fibroblast}
+    smooth_muscle: {lv0: Stromal, lv1: Stromal, lv2: Smooth Muscle}
+    endothelial: {lv0: Stromal, lv1: Vascular, lv2: Endothelial Vascular}
+    lymphatic: {lv0: Stromal, lv1: Vascular, lv2: Lymphatic Vascular}
+    plasma: {lv0: Immune, lv1: Lymphoid, lv2: Plasma cell}
+    b_cell: {lv0: Immune, lv1: Lymphoid, lv2: drop}
+    t_nk: {lv0: Immune, lv1: Lymphoid, lv2: drop}
+    macrophage: {lv0: Immune, lv1: Myeloid, lv2: Macrophage}
+    neutrophil: {lv0: Immune, lv1: Myeloid, lv2: Neutrophil}
+    mast: {lv0: Immune, lv1: Myeloid, lv2: drop}
+    glial: {lv0: Stromal, lv1: drop, lv2: drop}
+    ambiguous: {lv0: drop, lv1: drop, lv2: drop}
+    adipocyte: {lv0: drop, lv1: drop, lv2: drop}
+
+  # lv0 3 types | lv1 7 types | lv2 11 types. The only sample with a `Neuronal` label, and the
+  # only one whose lv2 has no macrophage label.
+  #
+  # `Intestinal Epithelial Other` is not a catch-all. It is this sample's enteroendocrine cluster
+  # (n=1,038, on CHGA/CHGB/GCG/PYY/TPH1/INSL5), so `Neuroendocrine` is the only group that belongs
+  # there. The absorptive groups go to `Goblet`, whose cluster carries the same goblet-plus-
+  # colonocyte programme (ZG16/PLA2G2A/CA2/ITLN1/CLCA1/FCGBP/MUC2) it does in P1 and P2.
+  P5:
+    tumor: {lv0: Epithelial, lv1: Tumor Epithelial, lv2: Tumor Epithelial}
+    goblet: {lv0: Epithelial, lv1: Intestinal Epithelial, lv2: Goblet}
+    enterocyte: {lv0: Epithelial, lv1: Intestinal Epithelial, lv2: Goblet}
+    neuroendocrine: {lv0: Epithelial, lv1: Intestinal Epithelial, lv2: Intestinal Epithelial Other}
+    fibroblast: {lv0: Stromal, lv1: Stromal, lv2: Fibroblast}
+    smooth_muscle: {lv0: Stromal, lv1: Stromal, lv2: Smooth Muscle}
+    endothelial: {lv0: Stromal, lv1: Vascular, lv2: Endothelial Vascular}
+    lymphatic: {lv0: Stromal, lv1: Vascular, lv2: Lymphatic Vascular}
+    plasma: {lv0: Immune, lv1: Lymphoid, lv2: Plasma cell}
+    b_cell: {lv0: Immune, lv1: Lymphoid, lv2: drop}
+    t_nk: {lv0: Immune, lv1: Lymphoid, lv2: drop}
+    macrophage: {lv0: Immune, lv1: Myeloid, lv2: drop}
+    neutrophil: {lv0: Immune, lv1: Myeloid, lv2: Neutrophil}
+    mast: {lv0: Immune, lv1: Myeloid, lv2: Mast cell}
+    glial: {lv0: Stromal, lv1: Neuronal, lv2: Neuronal}
+    ambiguous: {lv0: drop, lv1: drop, lv2: drop}
+    adipocyte: {lv0: drop, lv1: drop, lv2: drop}
+
+# ------------------------------------------------------------------------------- which cells, and
+# which blocks they come from
+
+cells:
+  # Each patient's tumour is its own clone: Tumor III is 99% P2CRC, Tumor II 83% P1CRC, Tumor IV
+  # 95% P5CRC. Pooling the tumour across blocks would describe a sample's tumour with other
+  # patients' clones, so the tumour group is restricted to the sample's own patient while the
+  # shared stromal and immune compartments keep all eight blocks. --pool-tumour overrides this.
+  patient_specific_groups: [tumor]
+  patient_of: {P1: P1CRC, P2: P2CRC, P5: P5CRC}
+
+# --------------------------------------------------------------- marker panels for the self-check
+
+# Not used to assign anything. `check_reference.py` asks whether each type scores highest on its
+# own panel, in the spirit of the C6 check in the samples' pseudovisium READMEs. Panels are the
+# markers each label was called on, restricted to genes present in the Flex probe set (TPSAB1 is
+# absent from it, so mast cells rest on CPA3).
+markers:
+  Tumor Epithelial: [CEACAM5, CEACAM6, EPCAM, LGALS4, MYC, EREG]
+  Tumor Epithelial Inflamed: [NDRG1, PLOD2, VEGFA, TAP1, CFB, WARS, CCL20, CXCL1]
+  Goblet: [MUC2, FCGBP, ZG16, TFF3, PIGR, CLCA1, SPINK4]
+  Paneth cell: [DEFA5, DEFA6, REG1A, REG1B]
+  Intestinal Epithelial Other: [CHGA, CHGB, GCG, PYY, TPH1, INSL5] # enteroendocrine, see P5 above
+  Intestinal Epithelial: [MUC2, FCGBP, TFF3, PIGR, CA2, FABP1]
+  Fibroblast: [COL1A1, LUM, DCN, SPARC]
+  Smooth Muscle: [TAGLN, MYH11, DES, ACTA2, MYLK]
+  Vascular: [PECAM1, VWF, PLVAP, ENG, CLDN5]
+  Endothelial Vascular: [PECAM1, VWF, PLVAP, ENG, CLDN5]
+  Lymphatic Vascular: [PROX1, MMRN1, CCL21]
+  Stromal: [COL1A1, LUM, DCN, TAGLN, ACTA2]
+  Plasma cell: [JCHAIN, MZB1, DERL3]
+  B cell: [BANK1, MS4A1, CD79A]
+  T cell / NK cell: [CD3D, CD3E, IL7R, NKG7, GNLY]
+  Lymphoid: [JCHAIN, MZB1, MS4A1, CD3D, IL7R]
+  Macrophage: [CD68, CD163, C1QA, LYZ]
+  Neutrophil: [FCGR3B, CSF3R, S100A8, S100A9]
+  Mast cell: [CPA3, MS4A2, KIT]
+  Myeloid: [CD68, C1QA, LYZ, CPA3, CSF3R]
+  Neuronal: [PLP1, S100B, SOX10]
+  Epithelial: [EPCAM, CEACAM5, MUC2, KRT8, KRT18]
+  Immune: [PTPRC, CD68, JCHAIN, CD3D]
