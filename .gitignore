@@ -6,6 +6,7 @@ __pycache*
 *.sbatch
 *.pdf
 *.md
+*array.sh
 !README.md
 
 benchmark/results
@@ -29,6 +30,12 @@ models
 review
 simulations/full_simulations/plots
 simulations/semi_simulations/STHELAR/matches
+!simulations/semi_simulations/VisiumHD/deconv_code/run_c2l.py
+simulations/semi_simulations/VisiumHD/deconv_results
+simulations/semi_simulations/VisiumHD/figures
+simulations/semi_simulations/VisiumHD/hedest_models
+simulations/semi_simulations/VisiumHD/hedest_results
+simulations/semi_simulations/VisiumHD/perturbed_proportions
 simulations/semi_simulations/Xenium/figures
 
 debug.log
