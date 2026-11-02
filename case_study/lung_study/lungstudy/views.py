@@ -453,48 +453,6 @@ def zoom_series(
     return fig
 
 
-def transect_profile(
-    data: SampleData,
-    start: Sequence[float],
-    end: Sequence[float],
-    types: Sequence[str],
-    step_um: float = 5.0,
-    radius_um: float = 15.0,
-) -> pd.DataFrame:
-    """
-    The share of each type along a line (level-0 pixels from ``start`` to ``end``):
-
-    - ``hedest_*``: among the HEDeST cells within ``radius_um`` of each point;
-    - ``deconv_*``: the deconvolution of the spot the point falls in (NaN between spots);
-    - ``nearest_*``: the deconvolution of the nearest spot (a step function).
-    """
-
-    from scipy.spatial import cKDTree
-
-    start, end = np.asarray(start, float), np.asarray(end, float)
-    length_px = np.linalg.norm(end - start)
-    steps = int(length_px * data.mpp / step_um) + 1
-    points = start + np.linspace(0, 1, steps)[:, None] * (end - start)
-    tree = cKDTree(data.cells[["x", "y"]].to_numpy())
-    labels = data.cells["label"].to_numpy()
-    neighbours = tree.query_ball_point(points, r=radius_um / data.mpp)
-    spot_xy = data.spots.loc[data.props.index, ["x", "y"]].to_numpy()
-    distance, nearest = cKDTree(spot_xy).query(points)
-    rows = []
-    for i, point in enumerate(points):
-        row = {"position_um": i * step_um, "n_cells": len(neighbours[i])}
-        names = labels[neighbours[i]]
-        spot = data.props.index[nearest[i]]
-        for cell_type in types:
-            row[f"hedest_{cell_type}"] = float((names == cell_type).mean()) if len(names) else np.nan
-            value = float(data.props.loc[spot, cell_type])
-            row[f"nearest_{cell_type}"] = value
-            row[f"deconv_{cell_type}"] = value if distance[i] <= data.radius_px else np.nan
-        rows.append(row)
-
-    return pd.DataFrame(rows)
-
-
 def per_type_panels(
     data: SampleData, window: Window, ncols: int = 4, panel_size: float = 4.0, contours: Optional[bool] = None
 ):

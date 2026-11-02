@@ -3,25 +3,36 @@ Lymphoid aggregates (candidate tertiary lymphoid structures), from cells and fro
 
 From the HEDeST cells (``detect_cell_aggregates``):
 
-1. a nucleus is lymphoid when P(B cell) + P(T cell) > 0.5 at lv3 (mean of the 5 seeds,
-   without PPSA). Summing the two probabilities keeps the detection robust to HEDeST
-   hesitating between B and T, the hard distinction on H&E; NK cells are left out because
-   their lv3 proportions follow the epithelium in these slides;
+1. a nucleus is lymphoid when its HEDeST label (the most probable type, mean of the 5 seeds,
+   without PPSA, lv3) is B cell or T cell;
 2. positions in µm;
 3. DBSCAN on the lymphoid nuclei: eps = 15 µm, min_samples = 10 (at least 10 lymphoid
    nuclei within 15 µm, i.e. one per ~70 µm²: dense packing). Planned at 20 µm; on
    A_AAAA1879, 20 µm chained the peritumoral infiltrates into rings around the tumour nests,
-   so it was tightened to 15 µm before any comparison (the other values are reported as a
-   sensitivity analysis);
+   so it was tightened to 15 µm before any comparison;
 4. a cluster is kept with at least 50 lymphoid nuclei and a purity of at least 60% (lymphoid
    nuclei among all nuclei inside its outline);
 5. outline: concave hull of its nuclei, grown by 5 µm (a nucleus radius);
 6. described by its size, its B:T balance, how B and T cells are arranged inside it (mixed or
-   in separate zones), its B-cell follicles, and its lv4 composition (plasma cells, CD4 / CD8).
+   in separate zones: ``compartments``), its B-cell follicles, and the plasma cells around it (lv4).
+
+**B and T zones** (``compartments``): inside an aggregate, the touching pairs of lymphocytes
+(:mod:`lungstudy.contacts`) are B–B, T–T or B–T. If B and T cells were mixed like salt and
+pepper, the share of B–T pairs would be 2·pB·pT; the *B–T contact ratio* is the observed share
+over that (1: mixed; below 1: B cells touch B cells and T cells touch T cells, i.e. separate
+zones), with a permutation p-value (B / T labels shuffled among the aggregate's lymphocytes).
+The *rim and core* B shares are those of the lymphocytes in the outer and inner third of the
+depth (distance to the outline over the aggregate's largest depth). The B lineage is used
+throughout: lv3's "B cell" holds the plasma cells, which lv4 separates.
 
 From the spots (``detect_spot_regions``), what a deconvolution allows: spots whose B + T
 proportion reaches a threshold, grouped with their neighbours into regions; a region's
-smallest unit is one spot, and it has no inside.
+smallest unit is one spot, and it has no inside. The threshold is ``SPOT_THRESHOLD`` = 0.9
+(lv3, the same B + T as the cells): among 0.1-0.9, the one whose regions coincide best with the
+HEDeST aggregates and with the small-round reference on every slide (``threshold_sweep``), i.e.
+the most favourable setting for the deconvolution. With the 10%-filtered proportions no spot
+lies between 0.9 and 1 (every other type below 10% is set to 0), so 0.9 keeps the spots made of
+B and T cells only, and any higher threshold gives the same regions.
 
 A reference that owes nothing to the transcriptomics nor to HEDeST: the same DBSCAN on the
 *small round nuclei* of the segmentation (area < 25 µm², circularity > 0.8), the shape of
@@ -46,12 +57,16 @@ from shapely.geometry import Point
 from sklearn.cluster import DBSCAN
 
 LYMPHOID = ["B cell", "T cell"]
-DEFAULTS = dict(threshold=0.5, eps_um=15.0, min_samples=10, min_cells=50, min_purity=0.6)
+DEFAULTS = dict(eps_um=15.0, min_samples=10, min_cells=50, min_purity=0.6)
+SPOT_THRESHOLD = 0.9  # lv3 B + T of a spot: the outlines closest to HEDeST's and to the reference (``threshold_sweep``)
+THRESHOLDS = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
 SMALL_ROUND = dict(max_area_um2=25.0, min_circularity=0.8)
 
 
-def lymphoid_score(data: SampleData, types: Sequence[str] = LYMPHOID) -> pd.Series:
-    return data.pred[list(types)].sum(axis=1).reindex(data.cells.index)
+def lymphoid_cells(data: SampleData, types: Sequence[str] = LYMPHOID) -> pd.Series:
+    """1 for the nuclei whose HEDeST label is one of ``types`` (B cell or T cell), else 0."""
+
+    return data.cells["label"].isin(list(types)).astype(float)
 
 
 def small_round_score(data: SampleData) -> pd.Series:
@@ -132,7 +147,7 @@ def _empty() -> pd.DataFrame:
 
 
 def detect_spot_regions(
-    data: SampleData, types: Sequence[str] = LYMPHOID, threshold: float = 0.5, min_spots: int = 1
+    data: SampleData, types: Sequence[str] = LYMPHOID, threshold: float = SPOT_THRESHOLD, min_spots: int = 1
 ) -> pd.DataFrame:
     """
     Regions of neighbouring spots whose summed proportion of ``types`` reaches ``threshold``.
@@ -179,144 +194,68 @@ def detect_spot_regions(
 # ------------------------------------------------------------------ comparison
 
 
-def overlaps(left: pd.DataFrame, right: pd.DataFrame) -> pd.DataFrame:
-    """Every pair of overlapping polygons between two tables, with the intersection over union."""
+def union_iou(left: pd.DataFrame, right: pd.DataFrame) -> float:
+    """Intersection over union of the areas covered by two sets of outlines."""
+
+    if not len(left) or not len(right):
+        return 0.0
+    a = shapely.unary_union(list(left["polygon_um"]))
+    b = shapely.unary_union(list(right["polygon_um"]))
+    union = a.union(b).area
+    return float(a.intersection(b).area / union) if union else 0.0
+
+
+def recall(found: pd.DataFrame, reference: pd.DataFrame, min_share: float = 0.2) -> float:
+    """
+    Share of the ``reference`` outlines touched by one of ``found``: their intersection covers at
+    least ``min_share`` of the smaller of the two, so that a coarse region holding a small
+    aggregate counts as finding it.
+    """
+
+    if not len(reference):
+        return np.nan
+    if not len(found):
+        return 0.0
+    tree = shapely.STRtree(list(found["polygon_um"]))
+    touched = 0
+    for polygon in reference["polygon_um"]:
+        for j in tree.query(polygon, predicate="intersects"):
+            other = found["polygon_um"].iloc[j]
+            if polygon.intersection(other).area >= min_share * min(polygon.area, other.area):
+                touched += 1
+                break
+
+    return touched / len(reference)
+
+
+def threshold_sweep(
+    data: SampleData, aggregates: pd.DataFrame, reference: pd.DataFrame, thresholds: Sequence[float] = THRESHOLDS
+) -> pd.DataFrame:
+    """
+    The spot regions at every B + T threshold (lv3, ``detect_spot_regions``), against the HEDeST
+    aggregates and the small-round-nuclei reference: number of regions, area, share of the HEDeST
+    aggregates they touch, and how well the covered areas coincide (IoU).
+    """
 
     rows = []
-    if not len(left) or not len(right):
-        return pd.DataFrame(columns=["left", "right", "intersection_um2", "iou", "share_of_left", "share_of_smaller"])
-    right_tree = shapely.STRtree(list(right["polygon_um"]))
-    right_ids = list(right.index)
-    for left_id, polygon in left["polygon_um"].items():
-        for j in right_tree.query(polygon, predicate="intersects"):
-            other = right["polygon_um"].iloc[j]
-            inter = polygon.intersection(other).area
-            union = polygon.union(other).area
-            rows.append(
-                {
-                    "left": left_id,
-                    "right": right_ids[j],
-                    "intersection_um2": inter,
-                    "iou": inter / union if union else 0.0,
-                    "share_of_left": inter / polygon.area if polygon.area else 0.0,
-                    "share_of_smaller": inter / min(polygon.area, other.area) if min(polygon.area, other.area) else 0.0,
-                }
-            )
+    for threshold in thresholds:
+        regions = detect_spot_regions(data, threshold=threshold)
+        rows.append(
+            {
+                "sample": data.name,
+                "threshold": threshold,
+                "n_regions": len(regions),
+                "area_mm2": float(regions["area_um2"].sum() / 1e6) if len(regions) else 0.0,
+                "recall": recall(regions, aggregates),
+                "iou": union_iou(regions, aggregates),
+                "iou_reference": union_iou(regions, reference),
+            }
+        )
 
     return pd.DataFrame(rows)
 
 
-def detection_scores(found: pd.DataFrame, reference: pd.DataFrame, min_share: float = 0.2) -> Dict[str, float]:
-    """
-    Recall (share of the reference aggregates matched by a detection), precision (share of
-    the detections matching a reference aggregate) and F1. Two polygons match when their
-    intersection covers at least ``min_share`` of the smaller one, so that a coarse region
-    holding a small aggregate counts as finding it.
-    """
-
-    if not len(reference) or not len(found):
-        return {
-            "recall": np.nan if not len(reference) else 0.0,
-            "precision": np.nan if not len(found) else 0.0,
-            "f1": np.nan,
-        }
-    pairs = overlaps(reference, found)
-    matched = pairs[pairs["share_of_smaller"] >= min_share] if len(pairs) else pairs
-    covered = set(matched["left"]) if len(matched) else set()
-    real = set(matched["right"]) if len(matched) else set()
-    recall = len(covered) / len(reference)
-    precision = len(real) / len(found)
-    f1 = 2 * recall * precision / (recall + precision) if recall + precision else 0.0
-
-    return {"recall": recall, "precision": precision, "f1": f1}
-
-
 # ------------------------------------------------------------------ description
-
-
-def describe_aggregates(
-    aggregates: pd.DataFrame, data: SampleData, lv4: Optional[SampleData] = None, ring_um: float = 30.0
-) -> pd.DataFrame:
-    """
-    What is inside each HEDeST aggregate: B:T balance, B share from the rim to the core, and
-    with lv4 the plasma cells and the CD4 / CD8 T cells, inside and in a ring around it.
-    """
-
-    labels = data.cells["label"]
-    xy = data.cells[["x_um", "y_um"]].to_numpy()
-    index_of = pd.Series(np.arange(len(data.cells)), index=data.cells.index)
-    tree = cKDTree(xy)
-    rows = []
-    for aggregate_id, row in aggregates.iterrows():
-        polygon = row["polygon_um"]
-        members = index_of.loc[row["cell_ids"]].to_numpy()
-        names = labels.to_numpy()[members]
-        n_b, n_t = int((names == "B cell").sum()), int((names == "T cell").sum())
-        depth = np.array([polygon.exterior.distance(Point(p)) for p in xy[members]])
-        relative = depth / depth.max() if depth.max() > 0 else depth
-        lymph = np.isin(names, LYMPHOID)
-        core = lymph & (relative >= 0.5)
-        rim = lymph & (relative < 0.5)
-        b_core = float((names[core] == "B cell").mean()) if core.any() else np.nan
-        b_rim = float((names[rim] == "B cell").mean()) if rim.any() else np.nan
-        description = {
-            "aggregate": aggregate_id,
-            "n_B": n_b,
-            "n_T": n_t,
-            "B_share": n_b / max(n_b + n_t, 1),
-            "B_share_core": b_core,
-            "B_share_rim": b_rim,
-            "B_core_index": b_core - b_rim if np.isfinite(b_core) and np.isfinite(b_rim) else np.nan,
-            "max_depth_um": float(depth.max()),
-        }
-        for cell_type in ("epithelial", "macrophage", "CAF/fibro", "endothelial"):
-            description[f"share_{cell_type}"] = float((names == cell_type).mean())
-        if lv4 is not None:
-            lv4_names = lv4.cells["label"].reindex(data.cells.index).to_numpy()
-            inside_names = lv4_names[members]
-            ring = polygon.buffer(ring_um).difference(polygon)
-            x0, y0, x1, y1 = ring.bounds
-            candidates = np.asarray(
-                tree.query_ball_point([(x0 + x1) / 2, (y0 + y1) / 2], r=np.hypot(x1 - x0, y1 - y0) / 2 + 1), dtype=int
-            )
-            ring_members = candidates[shapely.contains_xy(ring, xy[candidates, 0], xy[candidates, 1])]
-            ring_names = lv4_names[ring_members]
-            for cell_type in ("plasma cell", "T CD4", "T CD8", "B cell"):
-                description[f"lv4_{cell_type}_inside"] = float((inside_names == cell_type).mean())
-                description[f"lv4_{cell_type}_ring"] = (
-                    float((ring_names == cell_type).mean()) if len(ring_names) else np.nan
-                )
-        rows.append(description)
-
-    return pd.DataFrame(rows).set_index("aggregate") if rows else pd.DataFrame()
-
-
-def zoning(aggregates: pd.DataFrame, data: SampleData, k: int = 6) -> pd.Series:
-    """
-    How B and T cells are arranged inside each aggregate: the share of B-T pairs among the
-    nearest-neighbour pairs of its lymphocytes, divided by the share expected if B and T were
-    mixed like salt and pepper (2 pB pT). 1: mixed; towards 0: separate B and T zones, the
-    organisation of a follicle and its T zone. A spot only gives the two proportions, never this.
-    """
-
-    labels = data.cells["label"]
-    xy = data.cells[["x_um", "y_um"]]
-    out = {}
-    for aggregate_id, row in aggregates.iterrows():
-        names = labels.loc[row["cell_ids"]]
-        lymph = names[names.isin(LYMPHOID)]
-        if len(lymph) < 20 or lymph.nunique() < 2:
-            out[aggregate_id] = np.nan
-            continue
-        points = xy.loc[lymph.index].to_numpy()
-        _, neighbours = cKDTree(points).query(points, k=k + 1)
-        is_b = lymph.to_numpy() == "B cell"
-        pairs_b = is_b[neighbours[:, 1:]]
-        heterotypic = (pairs_b != is_b[:, None]).mean()
-        p_b = is_b.mean()
-        out[aggregate_id] = float(heterotypic / (2 * p_b * (1 - p_b)))
-
-    return pd.Series(out, name="BT_mixing")
 
 
 def follicles(
@@ -361,64 +300,6 @@ def follicles(
                     "n_B": int(len(members)),
                     "B_share": share,
                     "area_um2": float(polygon.area),
-                }
-            )
-
-    return pd.DataFrame(rows)
-
-
-def radial_profiles(aggregates: pd.DataFrame, data: SampleData, bins: int = 5) -> pd.DataFrame:
-    """B share among the lymphoid nuclei by relative depth (0 = rim, 1 = deepest point), per aggregate."""
-
-    labels = data.cells["label"]
-    xy = data.cells[["x_um", "y_um"]]
-    rows = []
-    edges = np.linspace(0, 1, bins + 1)
-    for aggregate_id, row in aggregates.iterrows():
-        polygon = row["polygon_um"]
-        names = labels.loc[row["cell_ids"]].to_numpy()
-        points = xy.loc[row["cell_ids"]].to_numpy()
-        depth = np.array([polygon.exterior.distance(Point(p)) for p in points])
-        relative = depth / depth.max() if depth.max() > 0 else depth
-        lymph = np.isin(names, LYMPHOID)
-        for i in range(bins):
-            selection = (
-                lymph
-                & (relative >= edges[i])
-                & (relative <= edges[i + 1] if i == bins - 1 else relative < edges[i + 1])
-            )
-            if selection.sum() >= 5:
-                rows.append(
-                    {
-                        "aggregate": aggregate_id,
-                        "depth_bin": (edges[i] + edges[i + 1]) / 2,
-                        "B_share": float((names[selection] == "B cell").mean()),
-                        "n": int(selection.sum()),
-                    }
-                )
-
-    return pd.DataFrame(rows)
-
-
-def spot_region_profiles(regions: pd.DataFrame, data: SampleData) -> pd.DataFrame:
-    """For the spot regions with an inside: B share of B + T in their edge spots and their inner spots."""
-
-    neighbours = data.spot_neighbours()
-    rows = []
-    for region_id, row in regions.iterrows():
-        members = set(row["spots"])
-        inner = [s for s in members if len(neighbours[s]) >= 6 and all(n in members for n in neighbours[s])]
-        edge = [s for s in members if s not in inner]
-        if not inner:
-            continue
-        for where, spots in (("edge spots", edge), ("inner spots", inner)):
-            p = data.props.loc[spots]
-            rows.append(
-                {
-                    "region": region_id,
-                    "where": where,
-                    "B_share": float((p["B cell"] / (p["B cell"] + p["T cell"])).mean()),
-                    "n_spots": len(spots),
                 }
             )
 
@@ -478,3 +359,159 @@ def draw_polygon(
                 coordinates, closed=True, fill=False, edgecolor=color, linewidth=linewidth, linestyle=linestyle
             )
         )
+
+
+# ------------------------------------------------------------------ B and T zones
+
+
+def lineage_codes(labels: pd.Series) -> np.ndarray:
+    """1 for the B lineage (B and plasma cells), 0 for T cells (any subtype), -1 otherwise."""
+
+    from lungstudy.style import T_SUBTYPES
+
+    names = labels.to_numpy()
+    codes = np.full(len(names), -1, dtype=np.int8)
+    codes[np.isin(names, ["B cell", "plasma cell"])] = 1
+    codes[np.isin(names, ["T cell", *T_SUBTYPES])] = 0
+
+    return codes
+
+
+def depth_in(polygon, xy: np.ndarray) -> np.ndarray:
+    """Distance (µm) of points to the outline of a polygon (the points are inside it)."""
+
+    return shapely.distance(polygon.boundary, shapely.points(xy[:, 0], xy[:, 1]))
+
+
+def compartments(
+    aggregates: pd.DataFrame,
+    data: SampleData,
+    labels: Optional[pd.Series] = None,
+    n_permutations: int = 200,
+    seed: int = 0,
+    min_lymphocytes: int = 50,
+) -> pd.DataFrame:
+    """
+    How B and T cells are arranged inside each aggregate: B share, B–T contact ratio and its
+    permutation p-value, B share at the rim (relative depth < 1/3) and in the core (> 2/3),
+    their difference (``B_core_minus_rim``), and the largest depth.
+    """
+
+    labels = data.cells["label"] if labels is None else labels.reindex(data.cells.index)
+    codes = lineage_codes(labels)
+    xy = data.cells[["x_um", "y_um"]].to_numpy()
+    position = pd.Series(np.arange(len(data.cells)), index=data.cells.index)
+    pairs = data.contacts
+    rng = np.random.default_rng(seed)
+    rows = []
+    for aggregate_id, row in aggregates.iterrows():
+        members = position.loc[row["cell_ids"]].to_numpy()
+        lymph = members[codes[members] >= 0]
+        record = {"aggregate": aggregate_id, "n_lymphocytes": len(lymph)}
+        if len(lymph) < min_lymphocytes:
+            rows.append(record)
+            continue
+        is_b = codes[lymph] == 1
+        p_b = float(is_b.mean())
+        local = np.full(len(data.cells), -1, dtype=np.int64)
+        local[lymph] = np.arange(len(lymph))
+        inner = pairs[(local[pairs[:, 0]] >= 0) & (local[pairs[:, 1]] >= 0)]
+        a, b = local[inner[:, 0]], local[inner[:, 1]]
+        observed = float(np.mean(is_b[a] != is_b[b])) if len(inner) else np.nan
+        expected = 2 * p_b * (1 - p_b)
+        if len(inner) and 0 < p_b < 1:
+            null = np.empty(n_permutations)
+            for k in range(n_permutations):
+                shuffled = rng.permutation(is_b)
+                null[k] = np.mean(shuffled[a] != shuffled[b])
+            p_value = float((np.sum(null <= observed) + 1) / (n_permutations + 1))
+            ratio = observed / null.mean()
+        else:
+            p_value, ratio = np.nan, np.nan
+        depth = depth_in(row["polygon_um"], xy[lymph])
+        relative = depth / depth.max() if depth.max() > 0 else depth
+        rim, core = relative < 1 / 3, relative > 2 / 3
+        record.update(
+            {
+                "B_share": p_b,
+                "BT_pairs": int(len(inner)),
+                "BT_contact_ratio": ratio,
+                "BT_contact_p": p_value,
+                "BT_expected_share": expected,
+                "B_share_rim": float(is_b[rim].mean()) if rim.any() else np.nan,
+                "B_share_core": float(is_b[core].mean()) if core.any() else np.nan,
+                "max_depth_um": float(depth.max()),
+            }
+        )
+        record["B_core_minus_rim"] = record["B_share_core"] - record["B_share_rim"]
+        rows.append(record)
+
+    return pd.DataFrame(rows).set_index("aggregate")
+
+
+def zone_agreement(
+    aggregates: pd.DataFrame,
+    data: SampleData,
+    others: Dict[str, pd.Series],
+    radius_um: float = 25.0,
+    min_lymphocytes: int = 200,
+) -> pd.DataFrame:
+    """
+    Do independently trained models draw the same B and T zones? For each aggregate, the B
+    share among the lymphocytes within ``radius_um`` of each lymphocyte (lv3), and the same
+    with each other model's labels; the Spearman correlation of the two maps over the
+    lymphocytes. Single-cell calls can differ while the zones agree.
+    """
+
+    from scipy.stats import spearmanr
+
+    codes = {"main": lineage_codes(data.cells["label"])}
+    codes.update({name: lineage_codes(labels.reindex(data.cells.index)) for name, labels in others.items()})
+    xy = data.cells[["x_um", "y_um"]].to_numpy()
+    position = pd.Series(np.arange(len(data.cells)), index=data.cells.index)
+    rows = []
+    for aggregate_id, row in aggregates.iterrows():
+        members = position.loc[row["cell_ids"]].to_numpy()
+        lymph = members[codes["main"][members] >= 0]
+        if len(lymph) < min_lymphocytes:
+            continue
+        neighbours = cKDTree(xy[lymph]).query_ball_point(xy[lymph], radius_um)
+        maps = {}
+        for name, c in codes.items():
+            is_b = (c[lymph] == 1).astype(float)
+            is_l = (c[lymph] >= 0).astype(float)
+            num = np.array([is_b[n].sum() for n in neighbours])
+            den = np.array([is_l[n].sum() for n in neighbours])
+            maps[name] = np.where(den > 0, num / np.maximum(den, 1), np.nan)
+        record = {"aggregate": aggregate_id, "n_lymphocytes": len(lymph), "zone_sd": float(np.nanstd(maps["main"]))}
+        for name in others:
+            ok = np.isfinite(maps["main"]) & np.isfinite(maps[name])
+            record[f"rho_{name}"] = float(spearmanr(maps["main"][ok], maps[name][ok])[0]) if ok.sum() > 20 else np.nan
+        rows.append(record)
+
+    return pd.DataFrame(rows).set_index("aggregate") if rows else pd.DataFrame()
+
+
+def stage(row: pd.Series, max_ratio: float = 0.8, alpha: float = 0.01) -> str:
+    """
+    The organisation of an aggregate, from the cells alone:
+
+    - *with B follicle*: holds at least one B follicle (a dense B core, see :func:`follicles`);
+    - *B / T zones*: no follicle, but B and T touch each other at least 20% less than if mixed
+      (B–T contact ratio ≤ 0.8, permutation p < 0.01);
+    - *mixed*: neither.
+
+    These are the first steps of TLS maturation (aggregation, then separate B and T zones, then a
+    follicle); the later steps (follicular dendritic cells, germinal centre, high endothelial
+    venules) are not visible to cell types learnt from this reference, and are looked for in
+    the marker genes.
+    """
+
+    if row.get("n_follicles", 0) > 0:
+        return "with B follicle"
+    if row.get("BT_contact_ratio", np.nan) <= max_ratio and row.get("BT_contact_p", 1.0) < alpha:
+        return "B / T zones"
+    return "mixed"
+
+
+STAGES = ["mixed", "B / T zones", "with B follicle"]

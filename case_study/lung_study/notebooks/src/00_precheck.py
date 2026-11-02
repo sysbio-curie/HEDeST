@@ -12,6 +12,7 @@
 # | annotation level | **lv3** (cell2location) |
 # | proportions | **10pct_filter** (types below 10% of a spot set to 0, the rest renormalised) |
 # | HEDeST predictions | **without PPSA**, mean of the **5 seeds** |
+# | colours | the study palette (`lungstudy/style.py`), shared by pies and cells |
 #
 # Figures are also written to `figures/00_precheck/{{SAMPLE}}/`.
 # %%
@@ -37,7 +38,7 @@ import pandas as pd
 import seaborn as sns
 from IPython.display import Markdown, display
 
-from lungstudy import cache, paths, views
+from lungstudy import cache, paths, style, views
 from lungstudy import validation as V
 from lungstudy.data import SampleData, pick_sites
 
@@ -90,7 +91,7 @@ analyzer = PredAnalyzer(
     adata_name=data.meta["adata_name"],
     image_dict=image_dict,
     mpp=data.mpp,
-    palette=data.palette,
+    palette=style.palette(data.ct),
     adjusted=False,
 )
 print(data)
@@ -152,7 +153,7 @@ table = (
 table
 
 # %%
-seed0 = PredAnalyzer(load_run(run_dir / "seed_0", adjusted=False), palette=data.palette, adjusted=False)
+seed0 = PredAnalyzer(load_run(run_dir / "seed_0", adjusted=False), palette=style.palette(data.ct), adjusted=False)
 display(seed0.spot_metrics(subset="held_out").round(3))
 save(seed0.plot_proportion_scatter(subset="held_out"), "proportion_scatter_seed0_heldout")
 
@@ -190,10 +191,10 @@ seed_summary = ensemble.summary()
 seed_summary.round(3)
 
 # %%
-save(ensemble.plot_agreement(palette=data.palette), "seed_agreement")
+save(ensemble.plot_agreement(palette=style.palette(data.ct)), "seed_agreement")
 
 # %%
-save(ensemble.plot_abundance_across_seeds(palette=data.palette), "abundance_across_seeds")
+save(ensemble.plot_abundance_across_seeds(palette=style.palette(data.ct)), "abundance_across_seeds")
 
 # %%
 viz = analyzer.visualizer()

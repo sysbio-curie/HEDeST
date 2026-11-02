@@ -14,7 +14,12 @@ seed runs of every level and the proportion files, and writes under ``cache/<sam
 - ``spots.pkl``: one row per spot: centre, number of cells;
 - ``seed_spots_lv3.pkl``: per seed, the mean prediction of every spot and the split it was in
   (train / val / test), rebuilt exactly as HEDeST drew it;
+- ``contacts.npy``: the pairs of touching cells (see :mod:`lungstudy.contacts`);
+- ``markers.pkl``: raw counts of the TLS marker genes per spot, and each spot's total counts
+  (see :mod:`lungstudy.markers`);
 - ``meta.json``: mpp, spot diameter and pitch in pixels, the input paths.
+
+Every part is built only when missing, so adding a level or a table does not rebuild the rest.
 """
 from __future__ import annotations
 
@@ -22,7 +27,6 @@ import json
 import pickle
 from typing import Dict
 from typing import List
-from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -30,9 +34,7 @@ from loguru import logger
 from lungstudy import paths
 from scipy.spatial import cKDTree
 
-# (level, proportions) pairs cached for every sample: the four levels on the main
-# proportions, plus the main level on the raw proportions for the sensitivity checks.
-UNITS = [(level, paths.PROPORTIONS) for level in paths.LEVELS] + [(paths.MAIN_LEVEL, "raw")]
+UNITS = paths.UNITS
 
 
 def unit_key(level: str, kind: str = paths.PROPORTIONS) -> str:
@@ -75,25 +77,39 @@ def _shape_features(contours: List[np.ndarray]) -> pd.DataFrame:
 
 
 def build(name: str, overwrite: bool = False) -> None:
-    """Builds the cache of one sample."""
-
-    import anndata as ad
-
-    from hedest.analysis.loaders import load_seed_runs
-    from hedest.analysis.seeds import SeedEnsemble
-    from hedest.dataset_utils import split_data
-    from hedest.spots import spot_geometry
+    """Builds the cache of one sample: every part that is missing (all of them with ``overwrite``)."""
 
     sample = paths.sample(name)
     out = sample.cache()
     out.mkdir(parents=True, exist_ok=True)
-    if (out / "meta.json").exists() and not overwrite:
-        logger.info(f"{name}: cache exists, skipped")
-        return
+    if overwrite or not (out / "meta.json").exists():
+        _build_base(name)
+    if overwrite or not (out / "seed_spots_lv3.pkl").exists():
+        _build_seed_spots(name)
+    present = set(pd.read_pickle(out / "labels.pkl").columns) if (out / "labels.pkl").exists() else set()
+    for level, kind in UNITS:
+        key = unit_key(level, kind)
+        if overwrite or f"label_{key}" not in present or not (out / f"pred_{key}.pkl").exists():
+            _build_unit(name, level, kind)
+    if overwrite or not (out / "contacts.npy").exists():
+        _build_contacts(name)
+    if overwrite or not (out / "markers.pkl").exists():
+        _build_markers(name)
+    logger.info(f"{name}: cache complete in {out}")
 
+
+def _build_base(name: str) -> None:
+    """Cells (position, shape, HoVer-Net type, spot), contours, spots and meta."""
+
+    import anndata as ad
+
+    from hedest.analysis.loaders import load_run
+    from hedest.spots import spot_geometry
+
+    sample = paths.sample(name)
+    out = sample.cache()
     mpp = sample.mpp
 
-    # ---- segmentation
     logger.info(f"{name}: reading {sample.segmentation}")
     with open(sample.segmentation) as handle:
         nuc = json.load(handle)["nuc"]
@@ -125,7 +141,6 @@ def build(name: str, overwrite: bool = False) -> None:
     with open(out / "contours.pkl", "wb") as handle:
         pickle.dump({"ids": cell_ids, "contours": contours}, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
-    # ---- spots
     adata = ad.read_h5ad(sample.adata)
     adata_name = list(adata.uns["spatial"])[0]
     geometry = spot_geometry(adata, adata_name, mpp=mpp)
@@ -133,53 +148,9 @@ def build(name: str, overwrite: bool = False) -> None:
     centers = np.asarray(geometry.centers[:, :2], dtype="float64")
     pitch_px = float(np.median(cKDTree(centers).query(centers, k=2)[0][:, 1]))
 
-    labels: Dict[str, pd.Series] = {}
-    spot_dict: Optional[Dict[str, List[str]]] = None
-    for level, kind in UNITS:
-        key = unit_key(level, kind)
-        run_dir = sample.run_dir(level, kind)
-        logger.info(f"{name}: {key} from {run_dir}")
-        runs = load_seed_runs(run_dir, adjusted=False)
-        if len(runs) != len(paths.SEEDS):
-            raise RuntimeError(f"{run_dir}: {len(runs)} seeds found, {len(paths.SEEDS)} expected")
-        ensemble = SeedEnsemble(runs, adjusted=False)
-        mean = ensemble.mean().reindex(cells.index).astype("float32")
-        mean.to_pickle(out / f"pred_{key}.pkl")
-        runs[0].proportions.to_pickle(out / f"props_{key}.pkl")
-
-        labels[f"label_{key}"] = mean.idxmax(axis=1)
-        labels[f"conf_{key}"] = mean.max(axis=1)
-        labels[f"agree_{key}"] = ensemble.agreement().reindex(cells.index)
-
-        if (level, kind) == (paths.MAIN_LEVEL, paths.PROPORTIONS):
-            spot_dict = runs[0].spot_dict
-            rows = []
-            for run in runs:
-                params = run.params
-                order = list(run.spot_dict)
-                train, _, val, _, test, _ = split_data(
-                    run.spot_dict,
-                    run.proportions.reindex(order),
-                    train_size=params["train_size"],
-                    val_size=params["val_size"],
-                    rs=params["rs"],
-                )
-                if set(train) != set(run.train_spot_dict or {}):
-                    raise RuntimeError(f"{run.run_dir}: the rebuilt training split differs from the saved one")
-                split = {**{s: "train" for s in train}, **{s: "val" for s in val}, **{s: "test" for s in test}}
-                predictions = run.predictions_raw
-                for spot, members in run.spot_dict.items():
-                    members = [m for m in members if m in predictions.index]
-                    if not members:
-                        continue
-                    row = predictions.loc[members].mean(axis=0)
-                    rows.append({"seed": params["rs"], "spot": spot, "split": split[spot], **row.to_dict()})
-            pd.DataFrame(rows).to_pickle(out / "seed_spots_lv3.pkl")
-
-    pd.DataFrame(labels).to_pickle(out / "labels.pkl")
-
-    # ---- cells and spots
-    owner = {cell: spot for spot, members in (spot_dict or {}).items() for cell in members}
+    # the cells inside each spot, as HEDeST mapped them (the same for every unit)
+    spot_dict = load_run(sample.run_dir(paths.MAIN_LEVEL, paths.PROPORTIONS), adjusted=False).spot_dict
+    owner = {cell: spot for spot, members in spot_dict.items() for cell in members}
     cells["spot"] = [owner.get(c, "") for c in cells.index]
     cells["in_spot"] = cells["spot"] != ""
     distance, nearest = cKDTree(centers).query(centroids)
@@ -211,7 +182,81 @@ def build(name: str, overwrite: bool = False) -> None:
     }
     with open(out / "meta.json", "w") as handle:
         json.dump(meta, handle, indent=2)
-    logger.info(f"{name}: cache written to {out}")
+    logger.info(f"{name}: cells, contours and spots written")
+
+
+def _build_unit(name: str, level: str, kind: str) -> None:
+    """The mean of the 5 seeds without PPSA, its labels and seed agreement, and the training proportions."""
+
+    from hedest.analysis.loaders import load_seed_runs
+    from hedest.analysis.seeds import SeedEnsemble
+
+    sample = paths.sample(name)
+    out = sample.cache()
+    key = unit_key(level, kind)
+    run_dir = sample.run_dir(level, kind)
+    logger.info(f"{name}: {key} from {run_dir}")
+    index = cells(name).index
+    runs = load_seed_runs(run_dir, adjusted=False)
+    if len(runs) != len(paths.SEEDS):
+        raise RuntimeError(f"{run_dir}: {len(runs)} seeds found, {len(paths.SEEDS)} expected")
+    ensemble = SeedEnsemble(runs, adjusted=False)
+    mean = ensemble.mean().reindex(index).astype("float32")
+    mean.to_pickle(out / f"pred_{key}.pkl")
+    runs[0].proportions.to_pickle(out / f"props_{key}.pkl")
+
+    path = out / "labels.pkl"
+    table = pd.read_pickle(path) if path.exists() else pd.DataFrame(index=index)
+    table[f"label_{key}"] = mean.idxmax(axis=1)
+    table[f"conf_{key}"] = mean.max(axis=1)
+    table[f"agree_{key}"] = ensemble.agreement().reindex(index)
+    table.to_pickle(path)
+
+
+def _build_seed_spots(name: str) -> None:
+    """Per seed of the main unit: the mean prediction of every spot and the split it was in (train / val / test)."""
+
+    from hedest.analysis.loaders import load_seed_runs
+    from hedest.dataset_utils import split_data
+
+    sample = paths.sample(name)
+    runs = load_seed_runs(sample.run_dir(paths.MAIN_LEVEL, paths.PROPORTIONS), adjusted=False)
+    rows = []
+    for run in runs:
+        params = run.params
+        order = list(run.spot_dict)
+        train, _, val, _, test, _ = split_data(
+            run.spot_dict,
+            run.proportions.reindex(order),
+            train_size=params["train_size"],
+            val_size=params["val_size"],
+            rs=params["rs"],
+        )
+        if set(train) != set(run.train_spot_dict or {}):
+            raise RuntimeError(f"{run.run_dir}: the rebuilt training split differs from the saved one")
+        split = {**{s: "train" for s in train}, **{s: "val" for s in val}, **{s: "test" for s in test}}
+        predictions = run.predictions_raw
+        for spot, members in run.spot_dict.items():
+            members = [m for m in members if m in predictions.index]
+            if not members:
+                continue
+            row = predictions.loc[members].mean(axis=0)
+            rows.append({"seed": params["rs"], "spot": spot, "split": split[spot], **row.to_dict()})
+    pd.DataFrame(rows).to_pickle(sample.cache() / "seed_spots_lv3.pkl")
+
+
+def _build_contacts(name: str) -> None:
+    from lungstudy.contacts import touching_pairs
+
+    logger.info(f"{name}: touching cells")
+    pairs = touching_pairs(cells(name), contours(name), meta(name)["mpp"])
+    np.save(paths.sample(name).cache() / "contacts.npy", pairs)
+
+
+def _build_markers(name: str) -> None:
+    from lungstudy.markers import read_counts
+
+    read_counts(str(paths.sample(name).adata)).to_pickle(paths.sample(name).cache() / "markers.pkl")
 
 
 # ------------------------------------------------------------------ loading
@@ -252,6 +297,18 @@ def contours(name: str) -> Dict[str, np.ndarray]:
     with open(paths.sample(name).cache() / "contours.pkl", "rb") as handle:
         payload = pickle.load(handle)
     return dict(zip(payload["ids"], payload["contours"]))
+
+
+def contacts(name: str) -> np.ndarray:
+    """The pairs of touching cells, as row positions in :func:`cells`."""
+
+    return np.load(paths.sample(name).cache() / "contacts.npy")
+
+
+def markers(name: str) -> pd.DataFrame:
+    """Raw counts of the TLS marker genes per spot, with ``total_counts``."""
+
+    return pd.read_pickle(paths.sample(name).cache() / "markers.pkl")
 
 
 def table(name: str, level: str = paths.MAIN_LEVEL, kind: str = paths.PROPORTIONS) -> pd.DataFrame:

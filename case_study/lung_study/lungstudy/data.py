@@ -6,6 +6,9 @@ Everything about one sample, loaded from the cache, at one level of annotation.
     data.pred         # cells x cell types, mean of the 5 seeds
     data.props        # spots x cell types, the deconvolution HEDeST was trained on
     data.spots        # spot centres
+    data.contacts     # pairs of touching cells (row positions in data.cells)
+
+The proportions default to the level's rule (:data:`lungstudy.paths.KIND_OF`).
 """
 from __future__ import annotations
 
@@ -18,9 +21,9 @@ import numpy as np
 import pandas as pd
 from lungstudy import cache
 from lungstudy import paths
+from lungstudy import style
 from scipy.spatial import cKDTree
 
-from hedest.analysis.palette import Palette
 
 Window = Tuple[Tuple[float, float], Tuple[float, float]]
 
@@ -28,7 +31,8 @@ Window = Tuple[Tuple[float, float], Tuple[float, float]]
 class SampleData:
     """The cached tables of one sample at one level, plus its slide and contours on demand."""
 
-    def __init__(self, name: str, level: str = paths.MAIN_LEVEL, kind: str = paths.PROPORTIONS) -> None:
+    def __init__(self, name: str, level: str = paths.MAIN_LEVEL, kind: Optional[str] = None) -> None:
+        kind = kind or paths.KIND_OF[level]
         self.name = name
         self.level = level
         self.kind = kind
@@ -40,7 +44,7 @@ class SampleData:
         self.cells = cache.table(name, level, kind)
         self.pred = cache.predictions(name, level, kind)
         self.ct = list(self.pred.columns)
-        self.palette = Palette(self.ct)
+        self.palette = style.palette(self.ct + [n for n in style.COLORS if n not in self.ct])
 
         spots = cache.spots(name)
         props = cache.proportions(name, level, kind)
@@ -77,6 +81,12 @@ class SampleData:
                 for cell, (x, y), t in zip(self.cells.index, xy, types)
             }
         }
+
+    @cached_property
+    def contacts(self) -> np.ndarray:
+        """The pairs of touching cells (row positions in :attr:`cells`), see :mod:`lungstudy.contacts`."""
+
+        return cache.contacts(self.name)
 
     @cached_property
     def spot_tree(self) -> cKDTree:
@@ -124,13 +134,6 @@ class SampleData:
         return pd.DataFrame(rows).T[self.ct]
 
 
-def lymphoid_types(ct: list) -> list:
-    """The lymphocyte classes of a level, without NK cells (whose proportions track the epithelium here)."""
-
-    wanted = {"B cell", "T cell", "T CD4", "T CD8", "plasma cell", "immune_lymphoid", "T helper", "T reg"}
-    return [c for c in ct if c in wanted or c.startswith("T CD8")]
-
-
 def pick_sites(data: SampleData, min_cells: int = 8) -> Dict[str, dict]:
     """
     Picks the places of a slide worth zooming on, from the deconvolution alone.
@@ -171,9 +174,3 @@ def pick_sites(data: SampleData, min_cells: int = 8) -> Dict[str, dict]:
         out[name] = {"spot": spot, "x": x, "y": y, "why": why}
 
     return out
-
-
-def other_level(name: str, level: str, kind: Optional[str] = None) -> SampleData:
-    """Shortcut for another level of the same sample."""
-
-    return SampleData(name, level, kind or paths.PROPORTIONS)

@@ -16,7 +16,7 @@ import nbformat
 
 STUDY = Path(__file__).resolve().parents[1]
 SOURCES = STUDY / "notebooks" / "src"
-SAMPLES = ["A_AAAA1879", "A_AAAA1638", "A_AAAA1665"]
+SAMPLES = ["A_AAAA1879", "A_AAAA1638", "A_AAAA1665", "A_AAAA1649", "A_AAAA1654", "A_AAAA1680"]
 
 
 def cells_of(text: str) -> list:
