@@ -31,5 +31,6 @@ pd.set_option("display.max_columns", 40)
 sns.set_style("whitegrid")
 
 SAMPLES = paths.SAMPLES
-SAMPLE_COLORS = dict(zip(SAMPLES, ["#1b9e77", "#d95f02", "#7570b3", "#7f7f7f"]))
-METHOD_COLORS = {"deconvolution": "#e6ab02", "interpolation": "#e6ab02", "spots": "#e6ab02", "HEDeST": "#1f78b4", "blend": "#6a3d9a", "reference": "#33a02c"}
+SAMPLE_COLORS = dict(zip(paths.SAMPLES, ["#1b9e77", "#d95f02", "#7570b3", "#66a61e", "#e6ab02", "#a6761d"]))
+SHORT = {s: s[-4:] for s in paths.SAMPLES}
+METHOD_COLORS = {"deconvolution": "#f28e2b", "interpolation": "#f28e2b", "spots": "#f28e2b", "HEDeST": "#1f78b4", "blend": "#6a3d9a", "reference": "#33a02c"}
