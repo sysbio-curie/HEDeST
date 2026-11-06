@@ -140,7 +140,7 @@ def _draw_spot_pies(
     analyzer,
     sample: Sample,
     extent: Tuple[float, float, float, float],
-    pie_scale: float = 1.0,
+    pie_scale: Optional[float] = None,
 ) -> int:
     """
     Draws the proportions of every spot as a pie at the spot's position.
@@ -148,26 +148,40 @@ def _draw_spot_pies(
     One wedge per cell type present, its angle the proportion of that cell type, starting at
     twelve o'clock and following the columns of the table, so a cell type always sits at the
     same place -- the convention :func:`hedest.spots.export_spot_pies` uses for QuPath. The
-    radius is the real spot radius of the simulation, read from the AnnData.
+    radius fills the spot grid, so that neighbouring pies touch (see ``pie_scale``).
 
     Args:
         ax: The axis.
         analyzer: The analyzer of the sample.
         sample: The sample.
         extent: The shared field of view.
-        pie_scale: Factor on the spot radius, for when the true one is too small to read.
+        pie_scale: Factor on the true spot radius. ``None`` (the default) ignores the true
+            radius and fills the spot grid instead, so neighbouring pies just touch.
 
     Returns:
         The number of spots drawn.
     """
+
+    from scipy.spatial import cKDTree
 
     from hedest.dataset_utils import pp_prop
     from hedest.spots import spot_geometry
 
     table = pp_prop(analyzer.proportions.copy())
     geometry = spot_geometry(analyzer.adata, sample.name)
-    centres = dict(zip(map(str, geometry.ids), np.asarray(geometry.centers)[:, :2]))
-    radius = 0.5 * geometry.diameter * pie_scale
+    positions = np.asarray(geometry.centers)[:, :2]
+    centres = dict(zip(map(str, geometry.ids), positions))
+
+    if pie_scale is None:
+        # The true spot is smaller than the grid it sits on -- 1.55 pitches apart on lung, 1.43 on
+        # breast -- so at this size a pie is a speck of unreadable grey. Filling the grid instead
+        # makes neighbouring pies just touch, which is what a composition map has to show. The
+        # pies then overstate the sampled area, which is why the panel is titled "simulated spot
+        # proportions" and not "the spots".
+        pitch = float(np.median(cKDTree(positions).query(positions, k=2)[0][:, 1]))
+        radius = 0.5 * pitch
+    else:
+        radius = 0.5 * geometry.diameter * pie_scale
 
     y_max = float(analyzer.centroids["y"].max())
     wedges: List[Wedge] = []
@@ -271,7 +285,7 @@ def proportions_vs_predictions(
     gap_in: float = 0.045,
     legend_in: float = 0.26,
     point_size: float = 0.05,
-    pie_scale: float = 1.0,
+    pie_scale: Optional[float] = None,
     fontsize: float = 5.8,
 ) -> Figure:
     """
@@ -289,7 +303,8 @@ def proportions_vs_predictions(
         legend_in: Height of the legend strip, in inches. The title strip is not a parameter:
             it is solved for from the number of lines the longest title wraps onto.
         point_size: Marker size of one cell.
-        pie_scale: Factor on the spot radius.
+        pie_scale: Factor on the true spot radius; ``None`` fills the spot grid instead, so
+            neighbouring pies just touch.
         fontsize: Size of the panel titles, in points.
 
     Returns:

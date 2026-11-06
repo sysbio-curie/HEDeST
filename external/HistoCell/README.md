@@ -242,20 +242,28 @@ Written to `--output`:
 
 ### Colours
 
-The figures use the benchmark's hierarchically-consistent colour code: each
-level-0 category is a colour family (Epithelial blue, Immune green, Structural
-orange, Melanocyte purple) and finer types are shades within their family, so a
-cell type keeps its colour across levels.
+The figures use the benchmark's colour code: a hand-written colour per cell
+type, keyed by name, so a type keeps its colour across levels and methods. Hue
+says which compartment it belongs to — lymphoid green to teal, myeloid light
+golds, epithelium dark warm reds, all of structural one blue ladder,
+melanocyte near-black to rose magenta — and lightness says which member, because
+lightness is the channel that survives colour blindness (under red–green
+blindness green, gold and red collapse onto one yellowish axis, so those
+families sit in separate lightness bands instead).
 
-The scheme is **reproduced inside this package** (`bench.level_palette`) rather
-than imported, so nothing outside this repository is needed to run it. The
-family-to-leaf grouping it depends on is derived from the slide's own
-`sim/level*/proportions.csv` files: annotation levels are nested, so a coarse
-category's proportion is the sum of its children's spot by spot, which makes the
-tree recoverable from the proportions alone — and keeps it from drifting out of
-date. Checked against the benchmark's own palette on 39 (dataset, level) pairs:
-identical to the last bit. If the levels cannot be read, the plots fall back to
-`tab20` with a warning; the result files are unaffected either way.
+The table is **reproduced inside this package** (`bench.CELLTYPE_HEX`, used by
+`bench.level_palette`) rather than imported, so nothing outside this repository
+is needed to run it. It must match `hedest_bench.celltype_colors` and
+`simulations/semi_simulations/STHELAR/palette.py` exactly;
+`python -m hedest_bench.check_palette_sync` (in HEDeST-bench) asserts it. A cell type the table
+does not define is left out of the palette, which makes the caller fall back to
+`tab20` with a warning rather than silently drawing it grey; the result files
+are unaffected either way.
+
+Note that the figures already under `benchmark/results/HistoCell/` predate this
+table and keep the older generated colours — `run_histocell.py` has no
+plots-only mode, so recolouring them would mean re-running the method. Only new
+runs come out in the colours above.
 
 The prediction index is written as bare cell ids, so `pd.read_csv` will type a
 numeric id as `int64`. Cast to `str` before joining against `hovernet.json` keys.

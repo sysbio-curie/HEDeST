@@ -307,10 +307,17 @@ stage_counts
 # **Which aggregate** (by rule), one per slide: among the aggregates holding a HEDeST B follicle and
 # at least 15 spot centres (enough spots to read their genes), the one with the strongest zones
 # (largest spread of the local B share). H&E, the deconvolution, the HEDeST lv3 B and T cells
-# (follicles dashed), the lv4 cells (independent model), and the local B share of each lymphocyte.
+# (follicles dashed), and the local T share of each lymphocyte (red: the T zone, blue: the B
+# follicle; the T share is one minus the B share, the lymphocytes being B or T).
 
 # %%
-def local_b_share(d, aggregate_row, radius_um=25.0, labels=None):
+def local_t_share(d, aggregate_row, radius_um=25.0, labels=None):
+    """Each lymphocyte's share of T cells among the lymphocytes within ``radius_um``.
+
+    ``lineage_codes`` labels a lymphocyte 1 (B lineage) or 0 (T), and only lymphocytes are kept,
+    so this is exactly one minus the local B share: the T zone is where it is high.
+    """
+
     labels = d.cells["label"] if labels is None else labels
     codes = tls.lineage_codes(labels.reindex(d.cells.index))
     position = pd.Series(np.arange(len(d.cells)), index=d.cells.index)
@@ -318,8 +325,8 @@ def local_b_share(d, aggregate_row, radius_um=25.0, labels=None):
     lymph = members[codes[members] >= 0]
     xy = d.cells[["x_um", "y_um"]].to_numpy()[lymph]
     neighbours = cKDTree(xy).query_ball_point(xy, radius_um)
-    is_b = (codes[lymph] == 1).astype(float)
-    return lymph, np.array([is_b[n].mean() for n in neighbours])
+    is_t = (codes[lymph] == 0).astype(float)
+    return lymph, np.array([is_t[n].mean() for n in neighbours])
 
 
 def zoned_figure(sample, aggregate_id):
@@ -337,24 +344,18 @@ def zoned_figure(sample, aggregate_id):
         {"kind": "he"},
         {"kind": "pies", "props": d.props, "title": "deconvolution lv3"},
         {"kind": "cells", "highlight": ["B cell", "T cell"], "title": "HEDeST lv3: B and T cells (others grey)"},
-        {
-            "kind": "cells",
-            "labels": labels4[sample],
-            "highlight": ["B cell", "T cell", "plasma cell"],
-            "title": "HEDeST lv4 (independent model)",
-        },
     ]
     fig, axes = plt.subplots(1, len(panels) + 1, figsize=(6.2 * (len(panels) + 1), 6.4))
     F.crop_panels(d, window, panels, outlines=outlines, axes=axes[:-1])
     ax = axes[-1]
     views.show_tissue(ax, d, window, alpha=0.45)
-    lymph, share = local_b_share(d, row)
+    lymph, share = local_t_share(d, row)
     points = d.cells[["x", "y"]].to_numpy()[lymph]
     scatter = ax.scatter(
         points[:, 0],
         points[:, 1],
         c=share,
-        cmap="coolwarm_r",
+        cmap="coolwarm",
         vmin=0,
         vmax=1,
         s=views.nucleus_marker_size(ax, d, window),
@@ -362,8 +363,8 @@ def zoned_figure(sample, aggregate_id):
     )
     for polygon, color, linestyle, linewidth in outlines:
         tls.draw_polygon(ax, polygon, d.mpp, color, linewidth, linestyle=linestyle)
-    fig.colorbar(scatter, ax=ax, fraction=0.04, label="B share within 25 µm (blue: B zone, red: T zone)")
-    ax.set_title("local B share of the lymphocytes", fontsize=11)
+    fig.colorbar(scatter, ax=ax, fraction=0.04, label="T share within 25 µm (red: T zone, blue: B follicle)")
+    ax.set_title("local T share of the lymphocytes", fontsize=11)
     views.add_scalebar(ax, d, 100)
     info = described.loc[aggregate_id]
     fig.suptitle(
@@ -660,8 +661,9 @@ profiles[profiles["cell_type"] == "plasma cell"].pivot(index="distance_um", colu
 #   `geometry.spot_rings`);
 # - **plasma cells**: each spot's lv4 plasma-cell proportion, from the deconvolution.
 #
-# Every spot is a dot (jittered within its ring); black: the mean of the ring; dashed: the mean over
-# all spots of the slide. The dots on 0 are spots whose plasma proportion the 10% filter set to 0.
+# Every spot is a dot (jittered within its ring); the solid line is the mean of the ring and the
+# dashed one the mean over all spots of the slide, both in the plasma-cell colour of the study, as
+# in the profiles above. The dots on 0 are spots whose plasma proportion the 10% filter set to 0.
 # Aggregates drawn from the spots themselves (lv3 B + T ≥ 0.9) would not do here: lv3 counts plasma
 # cells as B cells, so they also take in plasma-cell-rich spots.
 
@@ -708,13 +710,23 @@ for ax, sample in zip(axes[0], SAMPLES):
         table["ring"] + rng.uniform(-0.3, 0.3, len(table)),
         table["plasma"],
         s=6,
-        color=METHOD_COLORS["deconvolution"],
+        color=PLASMA_COLOR,
         alpha=0.25,
         linewidths=0,
     )
     part = rings[rings["sample"] == sample]
-    ax.plot(part["ring"], part["plasma_mean"], color="black", marker="o", ms=6, linewidth=2, label="mean of the ring")
-    ax.axhline(part["slide_mean"].iloc[0], color="black", linestyle="--", linewidth=1, label="mean of the slide")
+    ax.plot(
+        part["ring"],
+        part["plasma_mean"],
+        color=PLASMA_COLOR,
+        marker="o",
+        ms=6,
+        linewidth=2,
+        markeredgecolor="white",
+        markeredgewidth=0.8,
+        label="mean of the ring",
+    )
+    ax.axhline(part["slide_mean"].iloc[0], color=PLASMA_COLOR, linestyle="--", linewidth=1, label="mean of the slide")
     ax.set_xticks(RINGS)
     ax.set_xticklabels(RING_NAMES)
     ax.set_xlabel("rings of spots from the nearest spot inside a HEDeST aggregate (1 ring ≈ 100 µm)")

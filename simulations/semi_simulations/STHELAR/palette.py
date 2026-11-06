@@ -1,34 +1,70 @@
-"""The STHELAR cell-type colours: one definition, used everywhere in this repository.
+"""The STHELAR cell-type colours: one hand-written table, used everywhere in this repository.
 
-The colour code is **hierarchically consistent**. Each level-0 category is a colour *family*
-with a base hue -- Epithelial blue, Immune green, Structural orange, Melanocyte purple -- and
-the finest (leaf) types are spread inside their family over a hue band with an alternating
-lightness, so that even crowded families stay recognisably in-family yet remain easy to tell
-apart. Any coarser category is drawn in the **mean colour of its member leaves**, so it reads
-as "the parent of" those leaves. A cell type therefore keeps its colour across annotation
-levels, across methods, and across every figure in the repository.
+Every cell type gets a colour chosen by hand, keyed by category *name*, so a type keeps its
+colour across annotation levels, across methods and across every figure here and in
+HEDeST-bench. This replaces an earlier generative scheme (family hue + an in-family
+hue/lightness ramp, with a parent drawn in the mean colour of its leaves), which produced
+muddy in-between parents and hue-identical siblings.
 
-The family -> leaf grouping is **derived from the proportions files themselves** rather than
-from a hierarchy table. Annotation levels are nested: a coarse class equals the sum of its
-children spot by spot, so a leaf can only sit under a coarse class that is >= it everywhere,
-and the true parent is the one whose children reproduce it exactly. The tree is therefore
-recoverable from two ``proportions.csv`` files, with nothing to keep in sync.
+**Six hue regions, one per compartment.** Hue says which family a type belongs to:
 
-This module lives beside the semi-simulated data it describes, and is the canonical copy. The
-scheme originated in HEDeST-bench (``hedest_bench.hier.colors``); it is reproduced here, once,
-so that this repository is self-contained. The two agree exactly: on all 39 STHELAR
-sample-levels and 218 categories the colours derived here are identical, to the float, to the
-ones HEDeST-bench's hand-written hierarchy produces.
+    lymphoid        green -> teal           myeloid       light golds
+    epithelium      dark warm reds          melanocyte    near-black -> rose magenta
+    structural      one blue ladder: stroma indigo in its dark half, vessels azure in
+                    its light half, the two interleaved
+
+**Lightness is the second channel, and it is the one that matters.** Under red-green colour
+blindness green, gold and red all collapse onto a single yellowish axis, so the lymphoid,
+myeloid and epithelial families become hue-identical no matter what is chosen. They are
+therefore kept in separate lightness bands -- epithelium dark (L* 28-71), myeloid light
+(L* 68-95), lymphoid in between (L* 45-71) -- and each family is itself a legible L* ladder,
+because lightness survives every form of colour blindness.
+
+**The two stain colours are out of bounds.** H&E is pink (eosin) and purple
+(haematoxylin), and the figures draw cells on a faded H&E background, so a cell type coloured
+like the stain is nearly invisible. Nearest stain colour across the palette is dE 16.1.
+
+**Structural is a single blue ladder, and that is a deliberate trade.** Stroma and vessels share
+one hue region so that structural never reads as the same family as immune green. It costs
+something, and the cost is measured: blue is the stain's own region (haematoxylin dark, faded
+haematoxylin pale), and for a red-green colourblind reader blue offers only *one* usable axis --
+lightness. Two blue sub-bands separated by *hue* do not work at all: indigo against azure is
+dE 3.1 under deuteranopia, because that difference lives almost entirely on the red-green axis.
+Hence one interleaved lightness ladder, stroma in the dark half and vessels in the light half,
+rather than two hue bands.
+
+Twelve structural names in blue is over-subscribed, and the ceiling is explicit: requiring all
+twelve to be mutually distinct (dE >= 10) *and* clear of the stain (dE >= 15) is infeasible;
+relaxing distinctness to 8 caps the colourblind floor at 8.6. This table sits at distinctness 9.3
+with a stain floor of 16.1, which is why the two closest structural blues are only dE 9.3 apart.
+If that becomes a problem in practice, the alternative on record is stroma in olive/sage, which
+restores normal-vision separation to 16.8 at the price of sharing a hue region with immune.
+
+**Colours need only be distinct within one annotation level.** No figure draws two levels at
+once, so e.g. level-0 ``Structural`` and level-4 ``High_proliferating_melanocyte`` may both be
+violet. That slack is what buys wide, genuinely distinguishable sibling bands instead of
+shades of one hue.
+
+Checked pairwise over all 39 STHELAR sample-levels, worst closest-pair dE (CIE76, against the
+Vienot-Brettel-Mollon simulations) is 12.9 normal / 12.1 deuteranopia / 12.5 protanopia /
+3.4 tritanopia, against 13.8 / 7.2 / 5.7 / 4.5 for the scheme this replaces -- so red-green
+colour blindness is roughly twice as well served, and normal vision about level.
 
     from palette import level_palette
     level_palette("lung_s3", 2)        # {category: (r, g, b)} in 0-1
 
-One copy is deliberately *not* wired to this module: ``external/HistoCell/bench.py`` keeps its
-own, so that the vendored package does not depend on this repository.
+``children()`` below still derives the family -> leaf tree from the proportions files (a
+coarse class equals the sum of its children spot by spot, so a leaf can only sit under a
+coarse class that is >= it everywhere). The colours no longer need it -- a name is enough --
+but ``benchmark/endecon_code/hierarchy.py`` imports it, so it stays.
+
+Two further copies of this table exist on purpose, so that neither consumer has to depend on
+this module: ``hedest_bench.celltype_colors`` in HEDeST-bench, and
+``external/HistoCell/bench.py`` inside the vendored method. They must agree exactly;
+``python -m hedest_bench.check_palette_sync`` in HEDeST-bench asserts it.
 """
 from __future__ import annotations
 
-import colorsys
 import glob
 import os
 from typing import Dict
@@ -40,82 +76,103 @@ import pandas as pd
 
 BENCH_ROOT = "/cluster/CBIO/data1/lgortana/STHELAR/bench_data"
 
-# Base hue (HLS, 0..1) of the recurring level-0 families; anything else gets an evenly spaced
-# hue that keeps its distance from the ones already taken.
-_FAMILY_HUE = {
-    "Epithelial": 0.60,  # blue
-    "Immune": 0.33,  # green
-    "Structural": 0.075,  # orange
-    "Melanocyte": 0.80,  # purple
+# Grey, reserved for the catch-all label and for anything not in the table.
+OTHER_COLOR = (0.63, 0.63, 0.63)
+OTHER_LABEL = "Other"
+
+# cell type -> colour. Grouped by compartment, ordered light to dark inside each group.
+CELLTYPE_HEX: Dict[str, str] = {
+    # --- immune: lymphoid, green -> teal (keeps blue content, survives deuteranopia)
+    "Immune": "#1E8B5A",
+    "Lymphoid": "#17805C",
+    "B_Plasma": "#1B8A4E",
+    "B-lineage": "#1B8A4E",
+    "B": "#177A46",
+    "Plasma": "#4FC2A1",
+    "T_NK": "#0D8A86",
+    "T/NK-lineage": "#0D8A86",
+    "T": "#0F8F88",
+    "T_CD8": "#0C7D7C",
+    # --- immune: myeloid, light golds (lightness is what separates it from epithelium)
+    "Myeloid": "#D49A2E",
+    "Monocyte/Macrophage": "#EEBB63",
+    "Monocyte/Macrophage/DC": "#E3A944",
+    "Mast": "#F7DDA0",
+    "DC": "#FCF0D8",
+    "Dendritic Cells": "#FCF0D8",
+    # --- structural: stroma, the dark half of the shared blue ladder
+    "Structural": "#16216A",
+    "Stromal": "#1A277F",
+    "Fibroblast_Myofibroblast": "#2539B6",
+    "CAF": "#3C51D7",
+    "Fibroblast": "#7886E3",
+    "Fibroblast/Myofibroblast": "#A2ACEC",
+    "Myofibroblast": "#101950",
+    # --- structural: vessels, the light half of the shared blue ladder
+    "Blood_vessel": "#1385BE",
+    "Blood vessel": "#1385BE",
+    "Blood Vessel": "#1385BE",
+    "Endothelial": "#1CA4E9",
+    "Angiogenic_endothelial": "#99D6F5",
+    "Pericyte": "#53BAEE",
+    "Smooth_muscle": "#09415D",
+    # --- epithelium: dark warm reds, kept below the myeloid band at every level
+    "Epithelial": "#A33A2B",
+    "Breast_epithelial_cell": "#A33A2B",
+    "Keratinocyte": "#BB4B30",
+    "Luminal_epithelial_cell": "#C96A45",
+    "Secretory_epithelial_cell": "#C25C3C",
+    "Squamous_epithelial_cell": "#78242E",
+    "Proliferating_epithelial": "#D4886B",
+    "Lung_epithelial_cell": "#A33A2B",
+    "Lung_alveolar_typeI_epithelial_cell": "#C26A45",
+    "Lung_alveolar_typeII_epithelial_cell": "#78242E",
+    "Lung_ciliated_epithelial_cell": "#D9A086",
+    # --- melanocyte: near-black plum -> vivid rose magenta
+    "Melanocyte": "#2E1424",
+    "High_proliferating_melanocyte": "#EB006D",
 }
-_HUE_BAND = 0.18  # max total hue spread across a family's leaves (+/- 0.09)
-_HUE_BAND_NREF = 6  # family size at which the full hue band is used
-_L_LO, _L_HI = 0.34, 0.72  # lightness ramp endpoints, before the zig-zag
-_L_ZIG = 0.13  # zig-zag amplitude (alternating leaves)
-_L_CLAMP = (0.26, 0.80)  # hard lightness bounds after the zig-zag
-_SAT = 0.66
 
 
-def _family_hue(top_cats: List[str]) -> Dict[str, float]:
+def rgb(name: str) -> Tuple[float, float, float]:
     """
-    The base hue of every level-0 category.
+    The colour of a cell type, as floats in 0-1.
 
     Args:
-        top_cats: The level-0 category names.
+        name: A cell type. Anything absent from the table -- including the catch-all
+            ``"Other"`` -- gets the reserved grey.
 
     Returns:
-        ``{category: hue}`` in 0-1.
+        ``(r, g, b)``.
     """
 
-    hues: Dict[str, float] = {}
-    free = [c for c in top_cats if c not in _FAMILY_HUE]
-    taken = [_FAMILY_HUE[c] for c in top_cats if c in _FAMILY_HUE]
-    for i, c in enumerate(free):
-        h = (i / max(1, len(free))) % 1.0
-        while any(abs(h - t) < 0.06 for t in taken):  # nudge away from the known families
-            h = (h + 0.07) % 1.0
-        taken.append(h)
-        hues[c] = h
-    for c in top_cats:
-        if c in _FAMILY_HUE:
-            hues[c] = _FAMILY_HUE[c]
+    value = CELLTYPE_HEX.get(name)
+    if value is None:
+        return OTHER_COLOR
 
-    return hues
+    return tuple(int(value[i : i + 2], 16) / 255 for i in (1, 3, 5))  # type: ignore[return-value]
 
 
-def _leaf_hls(h0: float, i: int, n: int) -> Tuple[float, float, float]:
+def unknown(names) -> List[str]:
     """
-    Hue, lightness and saturation of leaf ``i`` of ``n`` in the family of base hue ``h0``.
-
-    The hue is spread over a band whose width grows with the family size, so a small family
-    stays tight around its base hue (Structural reads orange, not red) while a crowded one
-    fans out. The lightness follows a gentle ramp plus an alternating zig-zag, which keeps
-    adjacent leaves apart even where the hue step is tiny. A lone leaf gets the pure
-    mid-family colour.
+    The cell types missing from the table, which would silently come out grey.
 
     Args:
-        h0: The family's base hue.
-        i: The leaf's index inside the family.
-        n: The family size.
+        names: The cell types to check.
 
     Returns:
-        ``(hue, lightness, saturation)``.
+        The missing names, excluding the catch-all label.
     """
 
-    if n == 1:
-        return h0 % 1.0, (_L_LO + _L_HI) / 2.0, _SAT
-
-    t = i / (n - 1)
-    band = _HUE_BAND * min(1.0, (n - 1) / (_HUE_BAND_NREF - 1))
-    light = _L_LO + (_L_HI - _L_LO) * t + (_L_ZIG if i % 2 == 0 else -_L_ZIG)
-    light = min(max(light, _L_CLAMP[0]), _L_CLAMP[1])
-
-    return (h0 + band * (t - 0.5)) % 1.0, light, _SAT
+    return [n for n in names if n not in CELLTYPE_HEX and n != OTHER_LABEL]
 
 
 def children(coarse: pd.DataFrame, fine: pd.DataFrame, tol: float = 1e-6) -> Dict[str, List[str]]:
     """
     Groups the fine cell types under their parent, from the proportions alone.
+
+    The colours no longer need this -- a cell type is coloured by name -- but
+    ``benchmark/endecon_code/hierarchy.py`` uses it to recover the tree.
 
     Args:
         coarse: The coarse level's ``spots x categories`` proportion matrix.
@@ -170,7 +227,7 @@ def _read_level(sample: str, level: int, bench_root: Optional[str] = None) -> pd
 
 def leaf_colors(sample: str, bench_root: Optional[str] = None) -> Dict[str, Tuple[float, float, float]]:
     """
-    The colour of every finest-level cell type of a sample, grouped by level-0 family.
+    The colour of every finest-level cell type of a sample.
 
     Args:
         sample: The sample name.
@@ -180,17 +237,7 @@ def leaf_colors(sample: str, bench_root: Optional[str] = None) -> Dict[str, Tupl
         ``{leaf cell type: (r, g, b)}`` in 0-1.
     """
 
-    levels = levels_of(sample, bench_root)
-    fine = _read_level(sample, levels[-1], bench_root)
-    families = children(_read_level(sample, levels[0], bench_root), fine)
-    hue = _family_hue(list(families))
-
-    out: Dict[str, Tuple[float, float, float]] = {}
-    for family, leaves in families.items():
-        for i, leaf in enumerate(leaves):
-            out[leaf] = colorsys.hls_to_rgb(*_leaf_hls(hue[family], i, len(leaves)))
-
-    return out
+    return level_palette(sample, levels_of(sample, bench_root)[-1], bench_root)
 
 
 def level_palette(sample: str, level: int, bench_root: Optional[str] = None) -> Dict[str, Tuple[float, float, float]]:
@@ -203,19 +250,16 @@ def level_palette(sample: str, level: int, bench_root: Optional[str] = None) -> 
         bench_root: The ``bench_data`` root; ``BENCH_ROOT`` when omitted.
 
     Returns:
-        ``{category: (r, g, b)}`` in 0-1, the mean colour of each category's leaves.
+        ``{category: (r, g, b)}`` in 0-1.
+
+    Raises:
+        KeyError: If the level holds a cell type the table does not define, which would
+            otherwise be drawn in the grey reserved for "other".
     """
 
-    levels = levels_of(sample, bench_root)
-    leaves = leaf_colors(sample, bench_root)
-    fine = _read_level(sample, levels[-1], bench_root)
+    cats = list(_read_level(sample, level, bench_root).columns)
+    missing = unknown(cats)
+    if missing:
+        raise KeyError(f"{sample} level{level}: cell types absent from the colour table: {missing}")
 
-    if level == levels[-1]:
-        members = {c: [c] for c in fine.columns}
-    else:
-        members = children(_read_level(sample, level, bench_root), fine)
-
-    return {
-        cat: tuple(sum(leaves[m][k] for m in members_of) / len(members_of) for k in range(3))
-        for cat, members_of in members.items()
-    }
+    return {cat: rgb(cat) for cat in cats}

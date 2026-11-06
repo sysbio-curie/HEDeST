@@ -18,7 +18,6 @@ touches the method; see README.md ("Benchmark adaptation") for the full list.
 """
 from __future__ import annotations
 
-import glob
 import json
 import logging
 import os
@@ -552,135 +551,99 @@ def clump_to_spots(
 # ---------------------------------------------------------------------------
 # Cell-type colours
 # ---------------------------------------------------------------------------
-# The benchmark draws its own figures with a hierarchically-consistent palette:
-# each level-0 category is a colour *family* (Epithelial blue, Immune green,
-# Structural orange, Melanocyte purple) and the finer types are shades inside
-# their family, so the same cell type keeps its colour across levels and a
-# level-4 plot is still readable next to a level-2 one.
+# The benchmark draws its own figures with a hand-written palette: every cell
+# type has a colour chosen by hand and keyed by *name*, so a type keeps its
+# colour across annotation levels, across methods and across every figure.
+# Hue says which compartment a type belongs to -- lymphoid green to teal,
+# myeloid light golds, epithelium dark warm reds, all of structural one blue
+# ladder (stroma its dark half, vessels its light half), melanocyte near-black
+# to rose magenta -- and lightness says which member, because lightness is the channel that survives
+# colour blindness: under red-green blindness green, gold and red collapse onto
+# one yellowish axis, so those families are kept in separate L* bands instead.
 #
-# The scheme is reproduced here rather than imported, so this package stays
-# self-contained.  The constants and the hue/lightness maths below are the
-# benchmark's; the family -> leaf grouping they need is *derived from the
-# proportions files themselves* (see `derive_hierarchy`) instead of from a
-# hand-written table, so it also cannot drift out of date.
-_FAMILY_HUE = {
-    "Epithelial": 0.60,  # blue
-    "Immune": 0.33,  # green
-    "Structural": 0.075,  # orange
-    "Melanocyte": 0.80,  # purple
+# Neither H&E stain colour is used.  The figures draw cells over a faded H&E
+# background, so a cell coloured like eosin pink or haematoxylin purple is
+# nearly invisible; the stain's own blue region is used only at
+# lightnesses it does not occupy, and the proliferating melanocyte is a vivid
+# rose magenta rather than the pale lilac it once was.
+#
+# The table is reproduced here rather than imported, so this package stays
+# self-contained.  It must match ``hedest_bench.celltype_colors`` and
+# ``simulations/semi_simulations/STHELAR/palette.py`` exactly;
+# ``python -m hedest_bench.check_palette_sync`` in HEDeST-bench asserts it.
+OTHER_COLOR = (0.63, 0.63, 0.63)
+OTHER_LABEL = "Other"
+
+CELLTYPE_HEX: Dict[str, str] = {
+    # --- immune: lymphoid, green -> teal
+    "Immune": "#1E8B5A",
+    "Lymphoid": "#17805C",
+    "B_Plasma": "#1B8A4E",
+    "B-lineage": "#1B8A4E",
+    "B": "#177A46",
+    "Plasma": "#4FC2A1",
+    "T_NK": "#0D8A86",
+    "T/NK-lineage": "#0D8A86",
+    "T": "#0F8F88",
+    "T_CD8": "#0C7D7C",
+    # --- immune: myeloid, light golds
+    "Myeloid": "#D49A2E",
+    "Monocyte/Macrophage": "#EEBB63",
+    "Monocyte/Macrophage/DC": "#E3A944",
+    "Mast": "#F7DDA0",
+    "DC": "#FCF0D8",
+    "Dendritic Cells": "#FCF0D8",
+    # --- structural: stroma, dark half of the blue ladder
+    "Structural": "#16216A",
+    "Stromal": "#1A277F",
+    "Fibroblast_Myofibroblast": "#2539B6",
+    "CAF": "#3C51D7",
+    "Fibroblast": "#7886E3",
+    "Fibroblast/Myofibroblast": "#A2ACEC",
+    "Myofibroblast": "#101950",
+    # --- structural: vessels, the light half of the shared blue ladder
+    "Blood_vessel": "#1385BE",
+    "Blood vessel": "#1385BE",
+    "Blood Vessel": "#1385BE",
+    "Endothelial": "#1CA4E9",
+    "Angiogenic_endothelial": "#99D6F5",
+    "Pericyte": "#53BAEE",
+    "Smooth_muscle": "#09415D",
+    # --- epithelium: dark warm reds
+    "Epithelial": "#A33A2B",
+    "Breast_epithelial_cell": "#A33A2B",
+    "Keratinocyte": "#BB4B30",
+    "Luminal_epithelial_cell": "#C96A45",
+    "Secretory_epithelial_cell": "#C25C3C",
+    "Squamous_epithelial_cell": "#78242E",
+    "Proliferating_epithelial": "#D4886B",
+    "Lung_epithelial_cell": "#A33A2B",
+    "Lung_alveolar_typeI_epithelial_cell": "#C26A45",
+    "Lung_alveolar_typeII_epithelial_cell": "#78242E",
+    "Lung_ciliated_epithelial_cell": "#D9A086",
+    # --- melanocyte: near-black plum -> rose magenta
+    "Melanocyte": "#2E1424",
+    "High_proliferating_melanocyte": "#EB006D",
 }
-_HUE_BAND = 0.18  # max total hue spread across a family's leaves
-_HUE_BAND_NREF = 6  # family size at which the full band is used
-_L_LO, _L_HI = 0.34, 0.72  # lightness ramp endpoints, before the zig-zag
-_L_ZIG = 0.13  # zig-zag amplitude (alternating leaves)
-_L_CLAMP = (0.26, 0.80)
-_SAT = 0.66
 
 
-def _family_hue(top_cats: Sequence[str]) -> Dict[str, float]:
-    hues: Dict[str, float] = {}
-    free = [c for c in top_cats if c not in _FAMILY_HUE]
-    taken = [_FAMILY_HUE[c] for c in top_cats if c in _FAMILY_HUE]
-    for i, c in enumerate(free):
-        h = (0.0 + i / max(1, len(free))) % 1.0
-        while any(abs(h - t) < 0.06 for t in taken):
-            h = (h + 0.07) % 1.0
-        taken.append(h)
-        hues[c] = h
-    for c in top_cats:
-        if c in _FAMILY_HUE:
-            hues[c] = _FAMILY_HUE[c]
-    return hues
-
-
-def _leaf_hls(h0: float, i: int, n: int) -> Tuple[float, float, float]:
-    """(hue, lightness, saturation) for leaf ``i`` of ``n`` in family hue ``h0``."""
-    if n == 1:
-        return h0 % 1.0, (_L_LO + _L_HI) / 2.0, _SAT
-    t = i / (n - 1)
-    band = _HUE_BAND * min(1.0, (n - 1) / (_HUE_BAND_NREF - 1))
-    hue = (h0 + band * (t - 0.5)) % 1.0
-    light = _L_LO + (_L_HI - _L_LO) * t + (_L_ZIG if i % 2 == 0 else -_L_ZIG)
-    light = min(max(light, _L_CLAMP[0]), _L_CLAMP[1])
-    return hue, light, _SAT
-
-
-def _children_of(coarse: pd.DataFrame, fine: pd.DataFrame, tol: float = 1e-6) -> Dict[str, List[str]]:
-    """Group the fine cell types under their parent, from the proportions alone.
-
-    Levels are nested: a coarse category's proportion is the sum of its
-    children's, spot by spot.  So a fine type can only belong to a coarse
-    category that is >= it everywhere, and the true parent is the one whose
-    children's sum reproduces it exactly.  That makes the tree recoverable from
-    two ``proportions.csv`` files, with no hierarchy table to keep in sync.
-    """
-    spots = coarse.index.intersection(fine.index)
-    C = coarse.loc[spots]
-    F = fine.loc[spots]
-    groups: Dict[str, List[str]] = {c: [] for c in coarse.columns}
-    for leaf in fine.columns:
-        f = F[leaf].to_numpy()
-        slack = {
-            c: float((C[c].to_numpy() - f).sum()) for c in coarse.columns if bool(((C[c].to_numpy() - f) >= -tol).all())
-        }
-        if not slack:
-            raise ValueError(f"no coarse category can contain '{leaf}'")
-        groups[min(slack, key=slack.get)].append(leaf)
-
-    for cat, members in groups.items():
-        if not members:
-            raise ValueError(f"coarse category '{cat}' got no children")
-        err = float(np.abs(F[members].to_numpy().sum(axis=1) - C[cat].to_numpy()).max())
-        if err > 1e-4:
-            raise ValueError(f"children of '{cat}' do not sum to it (max error {err:.2e})")
-    return groups
-
-
-def derive_hierarchy(sim_dir: str, level: int) -> Tuple[Dict[str, List[str]], Dict[str, List[str]]]:
-    """``({family: [leaf, ...]}, {category at `level`: [leaf, ...]})``.
-
-    ``sim_dir`` is the slide's ``sim/`` directory; level 0 supplies the colour
-    families and the finest level supplies the leaves.  Ordering follows the
-    ``proportions.csv`` column order, which is the benchmark's own.
-    """
-    levels = sorted(
-        (
-            int(os.path.basename(d)[5:])
-            for d in glob.glob(os.path.join(sim_dir, "level*"))
-            if os.path.exists(os.path.join(d, "proportions.csv"))
-        )
-    )
-    if not levels:
-        raise FileNotFoundError(f"no level*/proportions.csv under {sim_dir}")
-
-    def read(k):
-        df = pd.read_csv(os.path.join(sim_dir, f"level{k}", "proportions.csv"), index_col=0)
-        df.index = df.index.astype(str)
-        return df
-
-    fine = read(levels[-1])
-    families = _children_of(read(levels[0]), fine)
-    members = {c: [c] for c in fine.columns} if level == levels[-1] else _children_of(read(level), fine)
-    return families, members
+def celltype_rgb(name: str) -> Tuple[float, float, float]:
+    """``(r, g, b)`` in 0..1 for a cell type; grey for anything not in the table."""
+    value = CELLTYPE_HEX.get(name)
+    if value is None:
+        return OTHER_COLOR
+    return tuple(int(value[i : i + 2], 16) / 255 for i in (1, 3, 5))
 
 
 def level_palette(sim_dir: str, level: int) -> Dict[str, Tuple[float, float, float]]:
-    """``category -> RGB (0..1)``, in the benchmark's hierarchical colour code.
+    """``category -> RGB (0..1)`` for one level of a slide's ``sim/`` directory.
 
-    A category is drawn in the mean colour of the leaves it contains, so it
-    reads as "the parent of" them.
+    The categories are the columns of that level's ``proportions.csv``; each one
+    is looked up by name, so no hierarchy has to be derived to colour a plot.
+    Anything the table does not define is left out, which is what lets the
+    caller notice and fall back rather than silently drawing it grey.
     """
-    import colorsys
+    path = os.path.join(sim_dir, f"level{level}", "proportions.csv")
+    cats = list(pd.read_csv(path, index_col=0, nrows=0).columns)
 
-    families, members = derive_hierarchy(sim_dir, level)
-    hue = _family_hue(list(families))
-    leaf_rgb: Dict[str, Tuple[float, float, float]] = {}
-    for fam, leaves in families.items():
-        for i, leaf in enumerate(leaves):
-            leaf_rgb[leaf] = colorsys.hls_to_rgb(*_leaf_hls(hue[fam], i, len(leaves)))
-
-    palette: Dict[str, Tuple[float, float, float]] = {}
-    for cat, leaves in members.items():
-        cols = [leaf_rgb[m] for m in leaves]
-        palette[cat] = tuple(sum(c[k] for c in cols) / len(cols) for k in range(3))
-    return palette
+    return {c: celltype_rgb(c) for c in cats if c in CELLTYPE_HEX}

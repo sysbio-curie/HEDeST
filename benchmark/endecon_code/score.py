@@ -16,13 +16,15 @@ Figures, identical in style to every run in benchmark/results/PanoSpace/deconv:
   deconv_vs_truth.png             per-cell-type scatter against the truth
 
 Colours come from `simulations/semi_simulations/STHELAR/palette.py`, the single
-definition of the STHELAR colour code for the whole repository: level-0
-categories are colour families (Epithelial blue, Immune green, Structural
-orange, Melanocyte purple), finer types are shades within their family, and an
-intermediate category is the mean colour of its leaves. The family/leaf grouping
-is derived from the proportions files themselves, so there is no hierarchy table
-to keep in sync. Verified against the recorded palette.json: 56/56 colours
-identical.
+definition of the STHELAR colour code for the whole repository: a hand-written
+colour per cell type, keyed by name, so a type keeps its colour across levels
+and methods. Hue says which compartment it belongs to (lymphoid green to teal,
+myeloid light golds, epithelium dark warm reds, all of structural one blue
+ladder, melanocyte near-black to rose magenta) and lightness says which member,
+because lightness is the channel that survives colour blindness.
+Neither of the two H&E stain colours is used: a cell drawn in eosin pink or
+haematoxylin purple would vanish into the faded slide behind it. The recorded
+palette in `palette.json` is rewritten from the table whenever this runs.
 
     python score.py --sample lung_s3 --level 3 --run-dir <dir> --out-dir <dir>
 """

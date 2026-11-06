@@ -1,14 +1,45 @@
 """
 One colour per cell type for the whole study, shared by the spot pies and the HEDeST cells.
 
-The colours are fixed by name, not by position in a level's list, so a type keeps its colour at
-every level (B cells are the same blue at lv3 and lv4) and the pies and the cells of a figure
-always match. Lymphocytes get strong colours (B blue, T green, plasma magenta); the abundant
-types (epithelial, fibroblasts) get light ones, so that immune cells stand out on top of them.
+Hue says which compartment a type belongs to, and **lightness says which member**, in even steps:
 
-``merge_t`` folds the T-cell subtypes of lv4 and lv5 into one "T cell": HEDeST does not
-separate them (see ``00_settings``), so figures show the T lineage as one colour, in the pies
-and in the cells alike.
+    lymphoid    one green ladder        myeloid      light golds
+    epithelium  dark warm reds          structural   one blue ladder
+
+Lightness carries the load because it is the channel that survives colour blindness: under
+red-green blindness green, gold and red all collapse onto one yellowish axis, so those families
+are separated by L* band rather than by hue. Inside a single hue there is nothing *but* lightness
+-- two blue sub-bands split by hue measure dE 3.1 under deuteranopia -- so each family is one
+ladder with rungs about 15 L* apart, not a cluster of shades:
+
+    lymphoid    B cell 27, plasma cell 55, T cell 82, with NK cell on a turquoise at 68
+    structural  myofibroblast 16, CAF/fibro 30, SMC 45, endothelial 68, pericytes 81
+
+The lymphoid and structural ladders were rebuilt on 2026-11-03: B/plasma/T used to be green,
+mint and teal, which reads as three shades of one colour however far apart they measure, and
+SMC / endothelial sat at dE 13.0. The three lymphoid rungs are now 27 L* apart and
+SMC / endothelial measures 28.3.
+
+Neither H&E stain colour is used, because the figures draw cells over a faded H&E background and
+a cell in eosin pink or haematoxylin purple would vanish into it. One limit is worth knowing: a
+*light* green cannot be pulled far from faded eosin for a red-green colourblind viewer, since both
+wash out to a pale cream. The whole light-green band tops out near dE 11 (measured over hue
+130-160 by every lightness and saturation), so T cell sits at 10.9 -- the same trade the pale
+golds already make, DC being at 7.5.
+
+Colours are fixed by name, not by position in a level's list, so a type keeps its colour at every
+level and the pies and the cells of a figure always match. Checked pairwise over the real type set
+of every level, with the T subtypes merged as the figures draw them: the worst closest pair is
+dE 12.2 at lv2 and 12.8 at lv3/lv4/lv5, both of them inherited gold-against-salmon pairs
+(``immune_myeloid`` or ``macrophage`` against ``mesothelial``); every pair among the colours set
+here is 15.8 or more.
+
+A subtype deliberately shares its parent's colour (the three macrophage states, the two CAF/fibro
+states, every T subtype): HEDeST does not separate them, so the figures show one colour per
+lineage. ``merge_t`` folds the T-cell subtypes of lv4 and lv5 into one "T cell" for the same
+reason (see ``00_settings``). Two lv2 parents ride a rung of the ladder their children sit on and
+never share a figure with them: ``fibroblast`` takes the CAF/fibro rung, ``perivascular`` the SMC
+rung.
 """
 from __future__ import annotations
 
@@ -19,41 +50,43 @@ import pandas as pd
 from hedest.analysis.palette import Palette
 
 COLORS = {
-    # lymphocytes
-    "B cell": "#1f5fbf",
-    "plasma cell": "#e7298a",
-    "T cell": "#1a9641",
-    "T CD4": "#1a9641",
-    "T CD8": "#1a9641",
-    "T helper": "#1a9641",
-    "T reg": "#1a9641",
-    "T CD8 EM": "#1a9641",
-    "T CD8 cytotoxic": "#1a9641",
-    "T CD8 exhaust": "#1a9641",
-    "NK cell": "#17becf",
-    "immune_lymphoid": "#1f5fbf",
-    # myeloid
-    "macrophage": "#ff7f00",
-    "LAM macroph": "#ff7f00",
-    "intermediate macroph": "#ff7f00",
-    "proinflammatory macroph": "#ff7f00",
-    "DC": "#ffd92f",
-    "mast cell": "#984ea3",
-    "immune_myeloid": "#ff7f00",
-    "immune": "#1f5fbf",
-    # epithelium and stroma
-    "epithelial": "#c2b5dd",
-    "mesothelial": "#8f8f8f",
-    "CAF/fibro": "#c8b23c",
-    "CAF/fibro ADH1B+": "#c8b23c",
-    "CAF/fibro MYH11+": "#c8b23c",
-    "myofibroblast": "#a39021",
-    "fibroblast": "#c8b23c",
-    "stromal": "#c8b23c",
-    "SMC": "#8c510a",
-    "perivascular": "#8c510a",
-    "endothelial": "#d7301f",
-    "perictyes": "#fc9272",
+    # --- immune, lymphoid: one green ladder, dark -> light, and a turquoise for NK
+    "B cell": "#024B13",
+    "plasma cell": "#20973C",
+    "T cell": "#67E49D",
+    "T CD4": "#67E49D",
+    "T CD8": "#67E49D",
+    "T helper": "#67E49D",
+    "T reg": "#67E49D",
+    "T CD8 EM": "#67E49D",
+    "T CD8 cytotoxic": "#67E49D",
+    "T CD8 exhaust": "#67E49D",
+    "NK cell": "#37B5BE",
+    "immune_lymphoid": "#20973C",
+    "immune": "#20973C",
+    # --- immune, myeloid: light golds
+    "macrophage": "#EEBB63",
+    "LAM macroph": "#EEBB63",
+    "intermediate macroph": "#EEBB63",
+    "proinflammatory macroph": "#EEBB63",
+    "mast cell": "#F7DDA0",
+    "DC": "#FCF0D8",
+    "immune_myeloid": "#D49A2E",
+    # --- epithelium: dark warm reds
+    "epithelial": "#A33A2B",
+    "mesothelial": "#D4886B",
+    # --- structural, stroma: the dark half of the blue ladder
+    "myofibroblast": "#0D274A",
+    "stromal": "#04429F",
+    "CAF/fibro": "#04429F",
+    "CAF/fibro ADH1B+": "#04429F",
+    "CAF/fibro MYH11+": "#04429F",
+    "fibroblast": "#04429F",
+    # --- structural, vessels: the light half of the same ladder
+    "SMC": "#3D56FA",
+    "perivascular": "#3D56FA",
+    "endothelial": "#51ABFB",
+    "perictyes": "#AFC9FD",
 }
 OTHER = "#bdbdbd"
 

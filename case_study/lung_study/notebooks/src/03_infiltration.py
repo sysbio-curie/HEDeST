@@ -165,7 +165,8 @@ t_spots.round(3)
 #
 # On each slide, the two 150 µm windows holding the most T cells deep
 # inside the epithelium (< −20 µm), at least 1 mm apart: H&E, the deconvolution, and the HEDeST cells
-# (one palette for pies and cells) with the border (red).
+# (one palette for pies and cells). The compartment border is not drawn at this zoom: the window is
+# 150 µm wide and the line covers the cells it is there to place. It is on the overviews of 3.1.
 
 # %%
 for sample, d in data.items():
@@ -196,8 +197,6 @@ for sample, d in data.items():
             ],
             axes=axes[i],
         )
-        for ax in axes[i]:
-            I.draw_border(ax, d, comp, linewidth=2)
     fig.suptitle(f"{sample}: the places with the most T cells inside the epithelium", fontsize=13, y=1.0)
     fig.tight_layout()
     display(save(fig, f"intraepithelial_t_{sample}"))
@@ -239,14 +238,11 @@ pd.DataFrame(rows).set_index("sample").round(3)
 # %% [markdown]
 # **On the H&E** (by rule): on each slide, the two hidden spots with the most HEDeST T cells deeper
 # than 20 µm in their hexagon, those where the raw deconvolution also says ≤ 5% T first, at least
-# 1 mm apart. 200 µm windows: H&E, the filtered deconvolution (HEDeST's input), the raw
-# deconvolution, the HEDeST cells, with the epithelial border (red) and the spot (thick circle);
-# then a 70 µm H&E zoom on the densest deep T cells of the hexagon, their nuclei outlined in green,
-# to judge them by eye.
+# 1 mm apart. 200 µm windows: H&E, the filtered deconvolution (HEDeST's input) and the HEDeST
+# cells, with the spot drawn as a thick circle. As in 3.3 the compartment border is left out at
+# this zoom; it is on the overviews of 3.1.
 
 # %%
-from matplotlib.collections import PolyCollection
-
 for sample, d in data.items():
     table = hexagon_tables[sample]
     hidden = table[(table["T"] >= 5) & (table["deconv_T"] == 0)].copy()
@@ -261,9 +257,7 @@ for sample, d in data.items():
             chosen.append(spot)
         if len(chosen) == 2:
             break
-    distance = compartments[sample]["cells"]
-    hexagon = d.pitch_px * d.mpp / np.sqrt(3)
-    fig, axes = plt.subplots(len(chosen), 5, figsize=(31, 6.4 * len(chosen)), squeeze=False)
+    fig, axes = plt.subplots(len(chosen), 3, figsize=(19, 6.4 * len(chosen)), squeeze=False)
     for i, spot in enumerate(chosen):
         row = hidden.loc[spot]
         x, y = d.spot_xy(spot)
@@ -275,44 +269,14 @@ for sample, d in data.items():
                 {"kind": "he", "title": f"H&E — spot {spot}"},
                 {"kind": "pies", "title": f"deconvolution, 10% filter (HEDeST input): T {row['deconv_T']:.0%}"},
                 {
-                    "kind": "pies",
-                    "props": raw_props[sample],
-                    "title": f"deconvolution, raw: T {row['deconv_T_raw']:.0%}",
-                },
-                {
                     "kind": "cells",
                     "title": f"HEDeST: {int(row['T'])} T of {int(row['n'])} nuclei in the hexagon ({int(row['T_deep'])} > 20 µm inside)",
                 },
             ],
-            axes=axes[i, :4],
+            axes=axes[i],
         )
-        for ax in axes[i, :4]:
-            I.draw_border(ax, d, compartments[sample], linewidth=1.5)
+        for ax in axes[i]:
             views.add_spot_circles(ax, d, window, spots=[spot], color="black", linewidth=2.0)
-        members = d.cells.index[
-            (d.cells["nearest_spot"] == spot)
-            & (d.cells["nearest_spot_dist_um"] <= hexagon)
-            & (d.cells["label"] == "T cell")
-            & (distance < -20)
-        ]
-        if not len(members):
-            members = d.cells.index[(d.cells["nearest_spot"] == spot) & (d.cells["label"] == "T cell")]
-        points = d.cells.loc[members, ["x", "y"]].to_numpy()
-        centre = points[np.argmax(cKDTree(points).query_ball_point(points, 20 / d.mpp, return_length=True))]
-        zoom = d.window(centre[0], centre[1], 70)
-        ax = axes[i, 4]
-        views.show_tissue(ax, d, zoom)
-        t_ids = d.cells.index[
-            (d.cells["label"] == "T cell").to_numpy() & views.in_window(d.cells[["x", "y"]].to_numpy(), zoom, 20)
-        ]
-        ax.add_collection(
-            PolyCollection(
-                [d.contours[c] for c in t_ids], facecolors="none", edgecolors=style.COLORS["T cell"], linewidths=2.0
-            )
-        )
-        I.draw_border(ax, d, compartments[sample], linewidth=1.5)
-        views.add_scalebar(ax, d, 20)
-        ax.set_title("70 µm zoom: HEDeST T nuclei outlined", fontsize=11)
     fig.suptitle(
         f"{sample}: T cells inside the epithelium that the filtered deconvolution does not report", fontsize=13, y=1.0
     )
