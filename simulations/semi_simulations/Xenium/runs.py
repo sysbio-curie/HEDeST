@@ -57,6 +57,8 @@ class Sample:
         image_dict: Nucleus crops, keyed by cell id.
         rotate: Whether to draw the slide turned a quarter turn. The lung slide is a tall
             narrow strip, so it only fits a row of panels on its side.
+        colors: One colour per cell type, in the order of the prediction columns (see
+            :data:`SAMPLES`).
     """
 
     key: str
@@ -66,6 +68,7 @@ class Sample:
     name: str
     image_dict: Path
     rotate: bool
+    colors: Dict[str, str]
 
     @property
     def proportions_path(self) -> Path:
@@ -88,6 +91,44 @@ class Sample:
         return GRIDSEARCH / self.dataset / LEVEL
 
 
+# The colour code of the project, as the STHELAR benchmark and the two case studies use it: hue
+# says which compartment a cell type belongs to and lightness says which member of it, in even
+# steps. Lightness carries the load because it is the channel that survives colour blindness --
+# under red-green blindness green, gold and red collapse onto one yellowish axis -- so a family is
+# a ladder of lightness rather than a cluster of shades:
+#
+#     lymphoid    one green ladder, B dark / plasma mid / T light
+#     myeloid     light gold
+#     epithelium  dark warm reds
+#     structural  one blue ladder, stroma in its dark half, vessels in its light half
+#
+# Neither H&E stain colour is used. Myoepithelial cells are the one type with no counterpart
+# elsewhere in the project: they take a second, darker epithelial rung.
+#
+# Checked pairwise over the seven types of each sample, which all share the pies and the legend:
+# the closest pair is dE 22.8 on lung (B cell / plasma cell) and 24.0 on breast
+# (Myoepithelial_Cells / Tumor_Cells), under normal, deuteranopic and protanopic vision.
+#
+# The order is the order of the prediction columns, so that ``palette.names == run.ct_list``.
+LUNG_COLORS = {
+    "T cell": "#67E49D",  # lymphoid, light rung
+    "Epithelial cell": "#A33A2B",  # epithelium
+    "Macrophage/Monocyte": "#EEBB63",  # myeloid gold
+    "Stromal": "#04429F",  # structural, stroma rung
+    "Plasma cell": "#20973C",  # lymphoid, middle rung
+    "B cell": "#024B13",  # lymphoid, dark rung
+    "Endothelial cell": "#51ABFB",  # structural, vessel rung
+}
+BREAST_COLORS = {
+    "Tumor_Cells": "#A33A2B",  # epithelium
+    "Macrophages": "#EEBB63",  # myeloid gold
+    "Stromal_Cells": "#04429F",  # structural, stroma rung
+    "Myoepithelial_Cells": "#701C33",  # epithelium, the darker rung
+    "T_Cells": "#67E49D",  # lymphoid, light rung
+    "Endothelial_Cells": "#51ABFB",  # structural, vessel rung
+    "B_Cells": "#024B13",  # lymphoid, dark rung
+}
+
 SAMPLES: Dict[str, Sample] = {
     "lung": Sample(
         key="lung",
@@ -97,6 +138,7 @@ SAMPLES: Dict[str, Sample] = {
         name="Xenium_V1_humanLung_Cancer_FFPE",
         image_dict=DATA / "Xenium_V1_humanLung_Cancer_FFPE" / "image_dict_64px_20um.pt",
         rotate=True,
+        colors=LUNG_COLORS,
     ),
     "breast": Sample(
         key="breast",
@@ -106,6 +148,7 @@ SAMPLES: Dict[str, Sample] = {
         name="Xenium_FFPE_Human_Breast_Cancer_Rep1",
         image_dict=DATA / "Xenium_FFPE_Human_Breast_Cancer_Rep1" / "image_dict_64px_20um.pt",
         rotate=False,
+        colors=BREAST_COLORS,
     ),
 }
 
@@ -226,10 +269,17 @@ def load_analyzer(sample: Sample):
     """
 
     import torch
+    from hedest.analysis.palette import Palette
     from hedest.analysis.pred_analyzer import PredAnalyzer
     from hedest.utils import load_spatial_adata
 
     run = load_run(sample)
+    if list(sample.colors) != list(run.ct_list):
+        raise ValueError(
+            f"{sample.label}: the palette and the prediction columns must list the same cell types "
+            f"in the same order; palette {list(sample.colors)}, predictions {list(run.ct_list)}."
+        )
+
     logger.info(f"{sample.label}: loading the crops of {sample.image_dict.name}.")
     image_dict = torch.load(sample.image_dict, map_location="cpu", weights_only=False)
 
@@ -239,8 +289,19 @@ def load_analyzer(sample: Sample):
         adata=load_spatial_adata(str(sample.adata_path)),
         adata_name=sample.name,
         image_dict=image_dict,
+        palette=Palette.from_colors(sample.colors),
         adjusted=False,
     )
 
 
-__all__ = ["COMBINATION", "SAMPLES", "Sample", "cell_ids", "load_analyzer", "load_run", "mean_raw_predictions"]
+__all__ = [
+    "BREAST_COLORS",
+    "COMBINATION",
+    "LUNG_COLORS",
+    "SAMPLES",
+    "Sample",
+    "cell_ids",
+    "load_analyzer",
+    "load_run",
+    "mean_raw_predictions",
+]

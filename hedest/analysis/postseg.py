@@ -778,6 +778,7 @@ class SlideVisualizer:
         alpha: float = 0.9,
         cell_types: Optional[Sequence[str]] = None,
         max_pixels: int = DEFAULT_MAX_PIXELS,
+        shuffle: bool = False,
         title: Optional[str] = None,
         figsize: Tuple[float, float] = (12.0, 12.0),
         savefig: Optional[str] = None,
@@ -788,11 +789,14 @@ class SlideVisualizer:
 
         Args:
             window: ``"full"`` or ``((x, y), (w, h))`` in level-0 coordinates.
-            background: Whether to draw the tissue underneath.
+            background: Whether to draw the tissue underneath. Off is easier to read when
+                the cells cover the tissue anyway.
             point_size: Marker size. Chosen from the cell density when not given.
             alpha: Marker transparency.
             cell_types: Restricts the map to these cell types.
             max_pixels: Cap on the longest side of the background image.
+            shuffle: Draws the cells in one scatter, in a fixed random order, so no cell
+                type is systematically painted over another.
             title: Optional title.
             figsize: Figure size.
             savefig: Path to write the figure to.
@@ -828,6 +832,7 @@ class SlideVisualizer:
             extent=(0, region.image.shape[1], region.image.shape[0], 0) if background else None,
             point_size=point_size,
             alpha=alpha,
+            shuffle=shuffle,
             title=title if title is not None else f"{self._default_title(region)} — {len(indices)} cells",
             figsize=figsize,
             savefig=savefig,

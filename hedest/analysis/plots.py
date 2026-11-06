@@ -840,6 +840,7 @@ def plot_celltype_points(
     point_size: float = 1.0,
     alpha: float = 0.9,
     legend: bool = True,
+    shuffle: bool = False,
     title: Optional[str] = None,
     figsize: Tuple[float, float] = (11.0, 11.0),
     savefig: Optional[str] = None,
@@ -861,6 +862,10 @@ def plot_celltype_points(
         point_size: Marker size.
         alpha: Marker transparency.
         legend: Whether to add a cell-type legend outside the axes.
+        shuffle: Draws every cell in one scatter, in a fixed random order, instead of one
+            cell type at a time. Use it where the cells crowd: drawing a type at a time
+            stacks whole cell types on each other, so the last type of the palette hides
+            the ones before it and a sparse type disappears under a dominant one.
         title: Optional title.
         figsize: Figure size.
         savefig: Path to write the figure to.
@@ -880,19 +885,31 @@ def plot_celltype_points(
         ax.set_aspect("equal")
 
     labels = np.asarray(labels)
-    for cell_type in palette.names:
-        selection = labels == cell_type
-        if not selection.any():
-            continue
+    if shuffle:
+        # The seed is fixed so the same data always gives the same picture.
+        order = np.random.default_rng(0).permutation(len(labels))
         ax.scatter(
-            coordinates[selection, 0],
-            coordinates[selection, 1],
+            coordinates[order, 0],
+            coordinates[order, 1],
             s=point_size,
-            color=palette.rgb(cell_type),
+            c=[palette.rgb(label) for label in labels[order]],
             alpha=alpha,
             edgecolors="none",
-            label=cell_type,
         )
+    else:
+        for cell_type in palette.names:
+            selection = labels == cell_type
+            if not selection.any():
+                continue
+            ax.scatter(
+                coordinates[selection, 0],
+                coordinates[selection, 1],
+                s=point_size,
+                color=palette.rgb(cell_type),
+                alpha=alpha,
+                edgecolors="none",
+                label=cell_type,
+            )
 
     ax.axis("off")
     if title is not None:
