@@ -194,6 +194,92 @@ def summarise(results: pd.DataFrame, keys: Sequence[str]) -> pd.DataFrame:
     return out
 
 
+def paired_t_test(a: pd.Series, b: pd.Series) -> Dict[str, float]:
+    """
+    Two-sided paired t-test of ``a`` against ``b``, matched by seed, with a Wilcoxon check.
+
+    Args:
+        a: The scores of one method, indexed by seed.
+        b: The scores of the other method, indexed by seed.
+
+    Returns:
+        ``n`` (paired seeds), ``mean_a``, ``mean_b``, ``diff`` (mean of ``a - b``), ``t``,
+        ``df`` (``n - 1``), ``p``, and ``p_wilcoxon`` (two-sided Wilcoxon signed-rank test).
+        NaN where a test is undefined, e.g. when ``a - b`` is the same on every seed.
+    """
+
+    from scipy import stats
+
+    pair = pd.concat([a.rename("a"), b.rename("b")], axis=1).dropna()
+    d = (pair["a"] - pair["b"]).to_numpy(dtype=float)
+    n = len(d)
+    t, p = stats.ttest_rel(pair["a"], pair["b"]) if n > 1 and np.ptp(d) > 0 else (np.nan, np.nan)
+    try:
+        p_wilcoxon = float(stats.wilcoxon(d).pvalue)
+    except ValueError:  # every difference is zero
+        p_wilcoxon = np.nan
+
+    return {
+        "n": n,
+        "mean_a": pair["a"].mean(),
+        "mean_b": pair["b"].mean(),
+        "diff": d.mean(),
+        "t": float(t),
+        "df": n - 1,
+        "p": float(p),
+        "p_wilcoxon": p_wilcoxon,
+    }
+
+
+def ppsa_tests(results: pd.DataFrame, keys: Sequence[str]) -> pd.DataFrame:
+    """
+    PPSA against no PPSA in every group: paired t-test of the balanced accuracy over the seeds.
+
+    Args:
+        results: The per-seed table.
+        keys: The columns identifying a group (not ``variant`` nor ``seed``).
+
+    Returns:
+        One row per group, with the fields of :func:`paired_t_test` (``a`` = PPSA,
+        ``b`` = no PPSA, so a positive ``diff`` is a gain of PPSA).
+    """
+
+    rows = []
+    for group, sub in results.groupby(list(keys), sort=False, dropna=False):
+        wide = sub.pivot_table(index="seed", columns="variant", values=BA)
+        if "raw" not in wide or "ppsa" not in wide:
+            continue
+        group = group if isinstance(group, tuple) else (group,)
+        rows.append({**dict(zip(keys, group)), **paired_t_test(wide["ppsa"], wide["raw"])})
+
+    return pd.DataFrame(rows)
+
+
+def format_p(p: float) -> str:
+    """
+    A P value for a plot, two significant digits: decimals down to 0.001, then ``m × 10^e``.
+
+    Args:
+        p: The P value.
+
+    Returns:
+        The label, e.g. ``"P = 0.034"``, ``"P = 0.0014"`` or ``"P = 5.4 × 10$^{-6}$"`` (mathtext).
+    """
+
+    if not np.isfinite(p):
+        return "P = n/a"
+    if p >= 1e-3:
+        return f"P = {p:.{max(2, 1 - int(np.floor(np.log10(p))))}f}"
+    if p == 0:
+        return "P < 10$^{-300}$"
+    exponent = int(np.floor(np.log10(p)))
+    mantissa = p / 10**exponent
+    if round(mantissa, 1) >= 10:
+        mantissa, exponent = mantissa / 10, exponent + 1
+
+    return f"P = {mantissa:.1f} × 10$^{{{exponent}}}$"
+
+
 # ----------------------------------------------------------------------------------------
 # Plots
 # ----------------------------------------------------------------------------------------
@@ -385,7 +471,13 @@ def plot_k_series(summary: pd.DataFrame, stem: str, title: str) -> None:
     save_fig(fig, stem)
 
 
-def plot_design_bars(summary: pd.DataFrame, stem: str, title: str, order: Sequence[str]) -> None:
+def plot_design_bars(
+    summary: pd.DataFrame,
+    stem: str,
+    title: str,
+    order: Sequence[str],
+    tests: Optional[pd.DataFrame] = None,
+) -> None:
     """
     Balanced accuracy of a family of designs, grouped by balance.
 
@@ -394,6 +486,8 @@ def plot_design_bars(summary: pd.DataFrame, stem: str, title: str, order: Sequen
         stem: Path without extension.
         title: Figure title.
         order: The designs, left to right.
+        tests: Output of :func:`ppsa_tests` keyed by ``("design", "balance")``: every pair
+            of bars gets a bracket with the P value of PPSA against no PPSA.
     """
 
     balances = list(dict.fromkeys(summary["balance"]))
@@ -417,11 +511,27 @@ def plot_design_bars(summary: pd.DataFrame, stem: str, title: str, order: Sequen
                 color=VARIANT_COLORS[variant],
                 error_kw={"elinewidth": 1, "ecolor": "0.3"},
             )
+        if tests is not None:
+            tops = (
+                summary[summary["balance"] == balance]
+                .assign(top=lambda t: t["mean"] + t["ci"])
+                .groupby("design")["top"]
+                .max()
+            )
+            for j, design in enumerate(order):
+                row = tests[(tests["balance"] == balance) & (tests["design"] == design)]
+                if row.empty or design not in tops:
+                    continue
+                y = tops[design] + 0.03
+                x1, x2 = j - 0.5 * width, j + 0.5 * width
+                ax.plot([x1, x1, x2, x2], [y, y + 0.015, y + 0.015, y], color="black", lw=1)
+                ax.text(j, y + 0.022, format_p(row["p"].iloc[0]), ha="center", va="bottom", fontsize=8)
         ax.set_xticks(x)
         ax.set_xticklabels(order, fontsize=9)
         ax.set_title(balance, fontsize=10)
-        ax.set_ylim(0, 1)
+        ax.set_ylim(0, 1 if tests is None else 1.15)
         _grid(ax)
+        ax.set_yticks(np.round(np.arange(0, 1.01, 0.1), 1))
 
     axes[0].set_ylabel("balanced accuracy")
     _variant_legend(axes[0], figure=fig)
