@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns
+from scipy import stats
 
 
 def bar_plot_perf(
@@ -111,18 +112,85 @@ def compute_statistics(metrics_list: list[dict[str, float]]) -> tuple[dict[str, 
     """
     Computes mean and confidence intervals for a list of metrics.
 
+    The confidence interval is the t-based 95% CI of the mean over the runs,
+    ``t(0.975, n - 1) * sd / sqrt(n)``, as everywhere else in the benchmarks.
+
     Args:
         metrics_list: List of dictionaries containing metrics from each run.
 
     Returns:
-        Tuple containing the mean and confidence intervals for each metric.
+        Tuple containing the mean and the CI half-width for each metric.
     """
 
     df_metrics = pd.DataFrame(metrics_list)
     mean_values = df_metrics.mean().to_dict()
-    std_values = df_metrics.std()
+    std_values = df_metrics.std(ddof=1)
     count_values = df_metrics.count()
     se_values = std_values / np.sqrt(count_values)
-    ci_values = {f"{key} ci": 1.96 * se for key, se in se_values.items()}
+    t_values = stats.t.ppf(0.975, (count_values - 1).clip(lower=1))
+    ci_values = {
+        f"{key} ci": float(t * se) if n > 1 else 0.0
+        for (key, se), t, n in zip(se_values.items(), t_values, count_values)
+    }
 
     return mean_values, ci_values
+
+
+def paired_t_test(a: pd.Series, b: pd.Series) -> dict[str, float]:
+    """
+    Two-sided paired t-test of ``a`` against ``b``, matched by seed, with a Wilcoxon check.
+
+    Args:
+        a: The scores of one method, indexed by seed.
+        b: The scores of the other method, indexed by seed.
+
+    Returns:
+        ``n`` (paired seeds), ``mean_a``, ``mean_b``, ``diff`` (mean of ``a - b``), ``t``,
+        ``df`` (``n - 1``), ``p``, and ``p_wilcoxon`` (two-sided Wilcoxon signed-rank test).
+        NaN where a test is undefined, e.g. when ``a - b`` is the same on every seed.
+    """
+
+    pair = pd.concat([a.rename("a"), b.rename("b")], axis=1).dropna()
+    d = (pair["a"] - pair["b"]).to_numpy(dtype=float)
+    n = len(d)
+    t, p = stats.ttest_rel(pair["a"], pair["b"]) if n > 1 and np.ptp(d) > 0 else (np.nan, np.nan)
+    try:
+        p_wilcoxon = float(stats.wilcoxon(d).pvalue)
+    except ValueError:  # every difference is zero
+        p_wilcoxon = np.nan
+
+    return {
+        "n": n,
+        "mean_a": pair["a"].mean(),
+        "mean_b": pair["b"].mean(),
+        "diff": d.mean(),
+        "t": float(t),
+        "df": n - 1,
+        "p": float(p),
+        "p_wilcoxon": p_wilcoxon,
+    }
+
+
+def format_p(p: float) -> str:
+    """
+    A P value for a plot, two significant digits: decimals down to 0.001, then ``m × 10^e``.
+
+    Args:
+        p: The P value.
+
+    Returns:
+        The label, e.g. ``"P = 0.034"``, ``"P = 0.0014"`` or ``"P = 5.4 × 10$^{-6}$"`` (mathtext).
+    """
+
+    if not np.isfinite(p):
+        return "P = n/a"
+    if p >= 1e-3:
+        return f"P = {p:.{max(2, 1 - int(np.floor(np.log10(p))))}f}"
+    if p == 0:
+        return "P < 10$^{-300}$"
+    exponent = int(np.floor(np.log10(p)))
+    mantissa = p / 10**exponent
+    if round(mantissa, 1) >= 10:
+        mantissa, exponent = mantissa / 10, exponent + 1
+
+    return f"P = {mantissa:.1f} × 10$^{{{exponent}}}$"

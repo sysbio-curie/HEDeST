@@ -18,9 +18,14 @@ Writes, under ``benchmark/results/MHAST/``:
 
     comparison_per_seed.csv        one row per (dataset, method, seed)
     comparison_summary.csv         mean and 95% CI per (dataset, method)
+    comparison_tests.csv           the tests of COMPARISONS, per (dataset, metric)
     {tag}_metrics.xlsx             one summary sheet per method, plus the per-seed sheets
-    plots/balanced_accuracy_30spots.png|svg     the comparison asked for
+    plots/balanced_accuracy_30spots.png|svg     the comparison asked for, HEDeST vs MHAST tested
     plots/{tag}_all_metrics.png                 the four metrics, via benchmark.utils
+
+Statistics: every error bar is the t-based 95% CI of the mean over the n = 10 seeds; two
+methods are compared by a two-sided paired t-test over the seeds, checked by a two-sided
+Wilcoxon signed-rank test.
 
     python benchmark/mhast_benchmark.py
 """
@@ -44,6 +49,8 @@ sys.path.insert(0, REPO)
 
 from benchmark.utils import bar_plot_perf  # noqa: E402
 from benchmark.utils import compute_statistics  # noqa: E402
+from benchmark.utils import format_p  # noqa: E402
+from benchmark.utils import paired_t_test  # noqa: E402
 from hedest.analysis import load_seed_runs  # noqa: E402
 from hedest.analysis import PredAnalyzer  # noqa: E402
 
@@ -69,6 +76,13 @@ METHODS = {
     "HEDeST": "#9ecae1",
     "HEDeST + PPSA": "#08519c",
 }
+# (method a, method b): paired t-test of a against b over the seeds.
+COMPARISONS = [
+    ("HEDeST", "MHAST"),
+    ("HEDeST + PPSA", "HEDeST"),
+]
+# The comparisons drawn on the balanced-accuracy plot.
+PLOTTED = [("HEDeST", "MHAST")]
 
 
 def mhast_metrics(tag: str, mhast_dir: str) -> pd.DataFrame:
@@ -190,13 +204,40 @@ def ci95(values: pd.Series) -> float:
     return float(stats.t.ppf(0.975, n - 1) * values.std(ddof=1) / np.sqrt(n))
 
 
-def plot_balanced_accuracy(per_seed: pd.DataFrame, stem: str) -> None:
+def method_tests(per_seed: pd.DataFrame) -> pd.DataFrame:
+    """
+    The tests of :data:`COMPARISONS` for every dataset and metric.
+
+    Args:
+        per_seed: The per-seed table of every dataset.
+
+    Returns:
+        One row per (dataset, metric, comparison), with the fields of
+        :func:`benchmark.utils.paired_t_test`.
+    """
+
+    rows = []
+    for dataset, sub in per_seed.groupby("dataset", sort=False):
+        for metric in METRICS.values():
+            wide = sub.pivot_table(index="seed", columns="method", values=metric)
+            for a, b in COMPARISONS:
+                if a in wide and b in wide:
+                    rows.append(
+                        {"dataset": dataset, "metric": metric, "a": a, "b": b, **paired_t_test(wide[a], wide[b])}
+                    )
+
+    return pd.DataFrame(rows)
+
+
+def plot_balanced_accuracy(per_seed: pd.DataFrame, stem: str, tests: pd.DataFrame | None = None) -> None:
     """
     Balanced accuracy of the four methods on the two 30-spot datasets.
 
     Args:
         per_seed: The per-seed table of every dataset.
         stem: Path without extension; ``png`` and ``svg`` are written.
+        tests: Output of :func:`method_tests`; the :data:`PLOTTED` comparisons get a
+            bracket with their P value.
     """
 
     metric = METRICS["balanced_accuracy"]
@@ -226,6 +267,22 @@ def plot_balanced_accuracy(per_seed: pd.DataFrame, stem: str) -> None:
             )
             ax.bar_label(bars, fmt="%.3f", fontsize=7.5, padding=7)
 
+        if tests is not None:
+            for d, dataset in enumerate(datasets):
+                for a, b in PLOTTED:
+                    row = tests[
+                        (tests["dataset"] == dataset)
+                        & (tests["metric"] == metric)
+                        & (tests["a"] == a)
+                        & (tests["b"] == b)
+                    ]
+                    if row.empty or a not in methods or b not in methods:
+                        continue
+                    xs = [d + (methods.index(m) - (len(methods) - 1) / 2) * width for m in (a, b)]
+                    y = 1.09
+                    ax.plot([xs[0], xs[0], xs[1], xs[1]], [y, y + 0.015, y + 0.015, y], color="black", lw=1)
+                    ax.text(sum(xs) / 2, y + 0.022, format_p(row["p"].iloc[0]), ha="center", va="bottom", fontsize=8)
+
         chance = 1.0 / 4
         ax.axhline(chance, color="#d94801", linestyle="--", linewidth=1.2)
         ax.set_xticks(x)
@@ -233,15 +290,16 @@ def plot_balanced_accuracy(per_seed: pd.DataFrame, stem: str) -> None:
             [t.replace("_hoptimus_clusters_", " clusters, ").replace("_5mean_5var", "") for t in datasets]
         )
         ax.set_ylabel("balanced accuracy")
-        ax.set_ylim(0, 1.12)
-        ax.yaxis.set_major_locator(plt.MultipleLocator(0.1))
+        ax.set_ylim(0, 1.12 if tests is None else 1.2)
+        ax.set_yticks(np.round(np.arange(0, 1.01, 0.1), 1))
         ax.grid(axis="y", color="0.9", linewidth=0.8)
         ax.set_axisbelow(True)
         for side in ("top", "right"):
             ax.spines[side].set_visible(False)
         ax.set_title(
             f"Cell-level balanced accuracy on the 30-spot fully simulated datasets "
-            f"({int(summary['n_seeds'].max())} seeds, 95% CI)",
+            f"({int(summary['n_seeds'].max())} seeds, 95% CI"
+            + (", two-sided paired t-test)" if tests is not None else ")"),
             pad=30,
         )
         handles, labels = ax.get_legend_handles_labels()
@@ -299,7 +357,12 @@ def main() -> None:
     summary = per_seed.groupby(["dataset", "method"], sort=False)[list(METRICS.values())].agg(["mean", ci95])
     summary.to_csv(os.path.join(args.out_dir, "comparison_summary.csv"))
 
-    plot_balanced_accuracy(per_seed, os.path.join(plot_dir, "balanced_accuracy_30spots"))
+    tests = method_tests(per_seed)
+    tests.to_csv(os.path.join(args.out_dir, "comparison_tests.csv"), index=False)
+    shown = tests[tests["metric"] == metric]
+    print(shown[["dataset", "a", "b", "diff", "t", "df", "p", "p_wilcoxon"]].to_string())
+
+    plot_balanced_accuracy(per_seed, os.path.join(plot_dir, "balanced_accuracy_30spots"), tests)
     print(f"-> {os.path.join(plot_dir, 'balanced_accuracy_30spots.png')}")
     print(per_seed.groupby(["dataset", "method"], sort=False)[metric].agg(["mean", ci95, "size"]).to_string())
 

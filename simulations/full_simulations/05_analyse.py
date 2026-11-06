@@ -6,17 +6,22 @@ figures of steps 1 to 3):
 
   results_per_seed.csv              one row per (sample, variant, seed): the cell-level metrics
   results_summary.csv               mean and 95% CI of the balanced accuracy over the seeds
+  results_tests.csv                 PPSA vs no PPSA per sample and strength: paired t-test
   ppsa_all_samples                  every sample, without and with PPSA, chance level marked
   perturbation                      balanced accuracy against the perturbation strength
   k_series                          balanced accuracy against the number of clusters
-  design_6clusters                  base vs dup vs dup_not_mixed
+  design_6clusters                  base vs dup vs dup_not_mixed, PPSA vs no PPSA tested
   confusion/{sample}                row-normalised confusion, no PPSA | PPSA | difference
   galleries/{sample}_pred.png       crops grouped by predicted cluster (most confident cells)
   galleries/{sample}_gt.png         the same cells grouped by true cluster
 
 "variant" is the model output (``raw``) or the PPSA-adjusted one (``ppsa``); PPSA is applied
 inside spots only, which is all these datasets have. The curves come from the 10 seeds, the
-confusion matrices and the galleries from their mean probabilities. Figures are png + svg,
+confusion matrices and the galleries from their mean probabilities.
+
+Statistics: every error bar is the t-based 95% CI of the mean over the n = 10 seeds; PPSA
+and no PPSA are compared by a two-sided paired t-test over the seeds, checked by a two-sided
+Wilcoxon signed-rank test (results_tests.csv). Figures are png + svg,
 except the galleries (bitmaps, png only). The mean probabilities of each sample are also
 written next to the runs as ``predictions_{variant}.csv.gz``.
 
@@ -177,8 +182,9 @@ def figures(results: pd.DataFrame, todo: List[dict], galleries: bool = True, per
         A.plot_design_bars(
             A.summarise(family, ["design", "balance", "variant"]),
             os.path.join(PLOT_DIR, "design_6clusters"),
-            "Duplicated cluster, mixed or not (6 clusters, 200 spots, 10 seeds, 95% CI)",
+            "Duplicated cluster, mixed or not (6 clusters, 200 spots, 10 seeds, 95% CI, two-sided paired t-test)",
             order=["base", "dup", "dup_not_mixed"],
+            tests=A.ppsa_tests(family, ["design", "balance"]),
         )
 
     if not per_sample:
@@ -243,6 +249,8 @@ def main() -> None:
     keys = ["sample", "tag", "K", "n_clusters", "balance", "n_spots", "design", "strength", "variant"]
     summary = A.summarise(results, keys)
     summary.to_csv(os.path.join(args.plot_dir, "results_summary.csv"), index=False)
+    tests = A.ppsa_tests(results, [k for k in keys if k != "variant"])
+    tests.to_csv(os.path.join(args.plot_dir, "results_tests.csv"), index=False)
     log(f"tables written ({len(results)} rows, {len(summary)} groups)")
 
     if not args.no_figures:
