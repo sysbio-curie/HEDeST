@@ -14,7 +14,9 @@ Into ``{plots_dir}/``:
                              costs at that level
 * ``ppsa_effect.png``, ``ppsa_gated.png``, ``ppsa_split.png``, ``ppsa_traintest.png``
                              the gridsearch's four PPSA figures, on the gt and deconvolved arms,
-                             so the effect of PPSA can be read across levels and supervisions
+                             so the effect of PPSA can be read across levels and supervisions;
+                             ``ppsa_effect`` is drawn here, on P2 and P5 only, with the paired
+                             t-test of PPSA against no PPSA above every pair
 * ``ppsa_gain.png``          the same effect as a single number per (level, supervision): does
                              PPSA help more when the proportions are wrong, and more when there
                              are more cell types?
@@ -29,7 +31,12 @@ Into ``{plots_dir}/``:
 * ``confusion/{dataset}_{level}.png``  recall matrices without / with PPSA and their difference,
                              summed over the ten seeds, for the gt and deconvolved arms
 
-and ``{results_dir}/summary.csv``, one row per (sample, level, supervision).
+and ``{results_dir}/summary.csv``, one row per (sample, level, supervision), and
+``{results_dir}/ppsa_tests.csv``, the tests of ``ppsa_effect.png``.
+
+Statistics: every error bar is the t-based 95% CI of the mean over the ten seeds
+(``G.grouped_ci95``); PPSA and no PPSA are compared by a two-sided paired t-test over the seeds,
+checked by a two-sided Wilcoxon signed-rank test, as in the full simulations.
 
 Usage: python plots.py [--config visiumhd.yaml] [--svg]
 """
@@ -60,7 +67,12 @@ from gridsearch import load_config  # type: ignore[attr-defined] # noqa: E402
 sys.path.insert(0, str(STUDY / "deconv_code"))
 import paths as D  # noqa: E402  (deconv_code/paths.py: the samples' own files)
 
+sys.path.append(str(REPO))  # for benchmark/utils.py, the full simulations' tests
+from benchmark.utils import format_p  # noqa: E402
+from benchmark.utils import paired_t_test  # noqa: E402
+
 SAMPLES = ["P1", "P2", "P5"]
+PPSA_EFFECT_SAMPLES = ["P2", "P5"]  # P1 is not in the article's ppsa_effect figure
 LEVELS = ["lv0", "lv1", "lv2"]
 STRENGTHS = [0.05, 0.1, 0.25, 0.5]
 GT, DECONV = "#2171b5", "#d08b2f"
@@ -152,24 +164,135 @@ def figure_supervision(summary: pd.DataFrame, out: Path) -> None:
     )
 
 
-def figure_ppsa(summary: pd.DataFrame, out: Path) -> None:
+def ppsa_tests(runs: pd.DataFrame) -> pd.DataFrame:
+    """
+    PPSA against no PPSA on every pair of ``ppsa_effect.png``: two-sided paired t-test over the
+    seeds, with a two-sided Wilcoxon signed-rank check (``benchmark.utils.paired_t_test``).
+
+    The two accuracies of a seed come from the same trained model, so they are paired by seed.
+
+    Returns:
+        One row per (supervision, sample, level) of the gt and deconvolved arms of
+        ``PPSA_EFFECT_SAMPLES``: ``n`` seeds, both means, ``diff`` (PPSA − no PPSA), ``t``,
+        ``df``, ``p`` and ``p_wilcoxon``.
+    """
+
+    rows = []
+    for supervision in ["gt", "deconv"]:
+        for name in PPSA_EFFECT_SAMPLES:
+            for level in LEVELS:
+                here = runs[(runs.supervision == supervision) & (runs["sample"] == name) & (runs.level == level)]
+                if here.empty:
+                    continue
+                by_seed = here.set_index("seed")
+                test = paired_t_test(by_seed.bal_acc_ppsa, by_seed.bal_acc_raw)
+                rows.append(
+                    {
+                        "supervision": supervision,
+                        "sample": name,
+                        "level": level,
+                        "n_classes": int(here.n_classes.iloc[0]),
+                        "n": test["n"],
+                        "bal_acc_raw": test["mean_b"],
+                        "bal_acc_ppsa": test["mean_a"],
+                        **{key: test[key] for key in ["diff", "t", "df", "p", "p_wilcoxon"]},
+                    }
+                )
+
+    return pd.DataFrame(rows)
+
+
+def figure_ppsa_effect(summary: pd.DataFrame, tests: pd.DataFrame, out: Path) -> None:
+    """
+    ``G.unit_barplot``'s PPSA figure on the gt and deconvolved arms, with above every pair a
+    bracket, the difference PPSA − no PPSA and the P value of its paired t-test. Drawn here
+    rather than by the gridsearch's function so that ``gridsearch/plots.py`` stays as it is.
+    """
+
+    width = 0.4
+    fig, axes = plt.subplots(2, 1, figsize=(10.0, 7.6), squeeze=False)
+    for ax, supervision in zip(axes[:, 0], ["gt", "deconv"]):
+        pairs = tests[tests.supervision == supervision]
+        bars = summary[summary.supervision == supervision].set_index(["sample", "level"])
+        bars = bars.loc[list(zip(pairs["sample"], pairs["level"]))]
+        pos = np.arange(len(pairs))
+        for offset, (column, label, colour) in zip(
+            [-0.5, 0.5], [("bal_acc_raw", "without PPSA", G.LIGHT), ("bal_acc_ppsa", "with PPSA", G.DARK)]
+        ):
+            ax.bar(
+                pos + offset * width,
+                bars[column],
+                width,
+                yerr=bars[f"{column}_ci"],
+                color=colour,
+                capsize=2,
+                error_kw=dict(lw=0.7, ecolor="#444"),
+                label=label,
+            )
+
+        tops = np.maximum(bars.bal_acc_raw + bars.bal_acc_raw_ci, bars.bal_acc_ppsa + bars.bal_acc_ppsa_ci)
+        for x, top, (_, pair) in zip(pos, tops, pairs.iterrows()):
+            y = top + 0.02
+            left, right = x - width / 2, x + width / 2
+            ax.plot([left, left, right, right], [y, y + 0.012, y + 0.012, y], color="k", lw=0.8)
+            ax.annotate(
+                format_p(pair["p"]),
+                (x, y + 0.012),
+                xytext=(0, 2),
+                textcoords="offset points",
+                ha="center",
+                va="bottom",
+                fontsize=7.5,
+            )
+            ax.annotate(
+                f"{pair['diff']:+.3f}",
+                (x, y + 0.012),
+                xytext=(0, 12),
+                textcoords="offset points",
+                ha="center",
+                va="bottom",
+                fontsize=7.5,
+                color="#1a7f37" if pair["diff"] >= 0 else "#c62828",
+            )
+
+        ax.set_xticks(
+            pos,
+            [f"{p['sample']}_{supervision}\n{p['level']} ({p['n_classes']})" for _, p in pairs.iterrows()],
+            fontsize=8,
+        )
+        ax.set_xlim(-0.6, len(pairs) - 0.4)
+        G.acc_axis(ax, hi=1.12)
+        ax.set_yticks(np.round(np.arange(0, 1.01, 0.1), 1))
+        ax.set_ylabel(f"{supervision}\nbalanced accuracy", fontsize=9)
+        ax.spines[["top", "right"]].set_visible(False)
+
+    axes[0, 0].legend(loc="upper center", bbox_to_anchor=(0.5, 1.22), ncol=2, frameon=False, fontsize=9)
+    fig.suptitle(
+        "balanced accuracy without / with PPSA — true and deconvolved proportions\n"
+        f"error bars = 95% CI over {int(tests.n.max())} seeds; numbers = with − without PPSA, "
+        "two-sided paired t-test over the seeds",
+        y=1.0,
+        fontsize=12,
+    )
+    fig.tight_layout()
+    G.save(fig, str(out / "ppsa_effect.png"))
+
+
+def figure_ppsa(summary: pd.DataFrame, tests: pd.DataFrame, out: Path) -> None:
     """The gridsearch's four PPSA figures, with supervision where it had combinations."""
 
     note = "error bars = 95% CI over 10 seeds"
     arms = summary[summary.supervision.isin(["gt", "deconv"])]
     perturbed = summary[summary.supervision == "perturb"]
 
-    for table, stem, what in [
-        (arms, "ppsa_effect", "true and deconvolved"),
-        (perturbed, "ppsa_effect_perturbation", "perturbed"),
-    ]:
-        if table.empty:
-            continue
+    if not tests.empty:
+        figure_ppsa_effect(summary, tests, out)
+    if not perturbed.empty:
         G.unit_barplot(
-            table,
+            perturbed,
             [("bal_acc_raw", "without PPSA", G.LIGHT), ("bal_acc_ppsa", "with PPSA", G.DARK)],
-            f"balanced accuracy without / with PPSA — {what} proportions\n{note}",
-            str(out / f"{stem}.png"),
+            f"balanced accuracy without / with PPSA — perturbed proportions\n{note}",
+            str(out / "ppsa_effect_perturbation.png"),
             deltas=[("bal_acc_raw", "bal_acc_ppsa")],
         )
     if arms.empty:
@@ -535,9 +658,11 @@ def main() -> int:
     recalls = recall_table(runs)
     recalls.to_csv(results / "per_class_recall.csv", index=False)
     gain_table(runs).to_csv(results / "ppsa_gain.csv", index=False)
+    tests = ppsa_tests(runs)
+    tests.to_csv(results / "ppsa_tests.csv", index=False)
 
     figure_supervision(summary, out)
-    figure_ppsa(summary, out)
+    figure_ppsa(summary, tests, out)
     figure_ppsa_gain(runs, out)
     figure_perturbation(summary, out)
     figure_per_class(recalls, out)
