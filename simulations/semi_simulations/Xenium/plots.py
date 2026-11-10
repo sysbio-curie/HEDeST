@@ -20,8 +20,9 @@ upright panels of it would be 87 mm tall on its own; turned on its side the same
 mirrored. Breast is 1.33:1 and is drawn upright. Both keep the same layout, so the two rows
 differ in panel height only.
 
-Everything is drawn from the seed-averaged **raw** predictions of the combination the
-gridsearch elected; see :mod:`runs`.
+Everything is drawn from the **raw** predictions of ``hedest_code/xenium.yaml`` averaged over
+their ten seeds; see :mod:`runs`. The performance figures, which need the seeds one by one, are
+``performance.py``'s.
 
 Usage::
 
