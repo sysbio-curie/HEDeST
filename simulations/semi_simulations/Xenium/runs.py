@@ -1,22 +1,26 @@
 """
-The Xenium HEDeST predictions, as the gridsearch left them.
+The Xenium HEDeST predictions: the ten seeds of ``hedest_code/xenium.yaml``.
 
-HEDeST was already run on the two Xenium semi-simulations during the parameter gridsearch
-(``gridsearch/semi_sim.yaml``), so nothing is trained here: this module only reads those
-runs back and wraps them in the objects ``hedest.analysis`` expects, so that the figures can
-be drawn with the ordinary plotting functions.
+HEDeST is trained on the two Xenium semi-simulations by the gridsearch engine
+(``gridsearch/gridsearch.py``) on one combination and ten seeds, into ``hedest_models/``
+(``sbatch hedest_code/hedest_array.sh``). This module reads those runs back and wraps them in
+the objects ``hedest.analysis`` expects, so that the figures can be drawn with the ordinary
+plotting functions.
 
 Two things make that wrapping necessary rather than optional:
 
-* the gridsearch writes ``predictions.npz`` (``raw``, ``ppsa``, ``classes``) and
-  ``metrics.json`` per seed, **not** the ``info.pickle`` that :func:`load_run` reads, so
-  :class:`HedestRun` has to be built by hand from the arrays;
-* the cell ids live once per unit in ``cell_ids.txt``, beside the combinations, because every
-  combination of a unit scores the same cells in the same order.
+* the engine writes ``predictions.npz`` (``raw``, ``ppsa``, ``classes``) and ``metrics.json``
+  per seed, **not** the ``info.pickle`` that :func:`load_run` reads, so :class:`HedestRun` has
+  to be built by hand from the arrays;
+* the cell ids live once per unit in ``cell_ids.txt``, beside the combination, and the
+  train/val/test split of a seed is not saved: :func:`train_spot_dict` recomputes it, as the
+  engine drew it.
 
-The combination used is the one the gridsearch elected for H-Optimus-0 features over all
-datasets (``gridsearch/results/semi_sim/selected.csv``, "best mean rank over all datasets
-without PPSA"). The predictions are the **raw** ones, averaged over the three seeds.
+The combination is the one the gridsearch elected for H-Optimus-0 features over all datasets
+(``gridsearch/results/semi_sim/selected.csv``, "best mean rank over all datasets without
+PPSA"). :func:`load_run` gives the **raw** predictions averaged over the ten seeds, for the
+slide figures; :func:`seed_run` gives one seed, raw or PPSA-adjusted, for the performance
+figures, which carry the spread between seeds.
 """
 from __future__ import annotations
 
@@ -33,13 +37,13 @@ from loguru import logger
 REPO = Path(__file__).resolve().parents[3]
 DATA = Path("/cluster/CBIO/data1/lgortana")
 
-#: Where the gridsearch wrote its runs, for the H-Optimus-0 features.
-GRIDSEARCH = REPO / "models" / "gridsearch_semi_sim" / "hoptimus0"
+#: Where ``hedest_code/xenium.yaml`` writes its runs, for the H-Optimus-0 features.
+MODELS = Path(__file__).resolve().parent / "hedest_models" / "hoptimus0"
 
 #: The combination elected in ``gridsearch/results/semi_sim/selected.csv``.
 COMBINATION = "norm1_do0_a0.01_lr0.0001_l2_hd1024-512"
 
-#: The gridsearch level of the Xenium datasets: their annotation is not hierarchical.
+#: The level of the Xenium datasets in the engine's layout: their annotation is not hierarchical.
 LEVEL = "single"
 
 
@@ -51,7 +55,7 @@ class Sample:
     Attributes:
         key: Short name used in file names.
         label: Name shown on the figures.
-        dataset: The dataset name the gridsearch used.
+        dataset: The dataset name of ``hedest_code/xenium.yaml``.
         root: Directory holding the simulated spots and the segmentation.
         name: Sample name, which is also the key under ``adata.uns['spatial']``.
         image_dict: Nucleus crops, keyed by cell id.
@@ -87,8 +91,12 @@ class Sample:
         return self.root / "pannuke_fast_mask_lvl3_annotated.json"
 
     @property
+    def ground_truth_path(self) -> Path:
+        return self.root / f"sim_{self.name}_gt.csv"
+
+    @property
     def unit_dir(self) -> Path:
-        return GRIDSEARCH / self.dataset / LEVEL
+        return MODELS / self.dataset / LEVEL
 
 
 # The colour code of the project, as the STHELAR benchmark and the two case studies use it: hue
@@ -155,7 +163,7 @@ SAMPLES: Dict[str, Sample] = {
 
 def cell_ids(sample: Sample) -> List[str]:
     """
-    The cells the gridsearch scored, in the order its arrays use.
+    The cells the runs scored, in the order their arrays use.
 
     Args:
         sample: The sample.
@@ -188,10 +196,9 @@ def mean_raw_predictions(sample: Sample) -> pd.DataFrame:
     """
 
     combination = sample.unit_dir / COMBINATION
-    seeds = sorted(combination.glob("seed_*"))
     stack, classes = [], None
 
-    for seed_dir in seeds:
+    for seed_dir in seed_dirs(sample):
         path = seed_dir / "predictions.npz"
         if not path.exists():
             logger.warning(f"{path} is missing and is skipped.")
@@ -212,6 +219,126 @@ def mean_raw_predictions(sample: Sample) -> pd.DataFrame:
         raise ValueError(f"{sample.label}: {mean.shape[0]} rows of predictions for {len(cells)} cell ids.")
 
     return pd.DataFrame(mean, index=pd.Index(cells, name="cell_id"), columns=classes)
+
+
+def seed_dirs(sample: Sample) -> List[Path]:
+    """
+    The finished seeds of the combination, in seed order.
+
+    Args:
+        sample: The sample.
+
+    Returns:
+        The ``seed_*`` directories holding a ``metrics.json``.
+    """
+
+    found = (sample.unit_dir / COMBINATION).glob("seed_*")
+
+    return sorted((path for path in found if (path / "metrics.json").exists()), key=lambda p: int(p.name[5:]))
+
+
+def spot_dict(sample: Sample) -> Dict[str, List[str]]:
+    """
+    The spots as the engine reads them: string ids, empty spots dropped.
+
+    The order matters: it is the order :func:`train_spot_dict` splits.
+
+    Args:
+        sample: The sample.
+
+    Returns:
+        Spot id to the ids of its cells.
+    """
+
+    with open(sample.spot_dict_path) as handle:
+        spots = {str(spot): [str(cell) for cell in cells] for spot, cells in json.load(handle).items()}
+
+    return {spot: cells for spot, cells in spots.items() if cells}
+
+
+def train_spot_dict(sample: Sample, seed_dir: Path) -> Dict[str, List[str]]:
+    """
+    The training spots of one seed, redrawn as the engine drew them.
+
+    The engine does not save its split, but draws it with
+    :func:`hedest.dataset_utils.split_data` from the spot order and the seed alone, so the same
+    call gives the same spots. The split sizes are read from the run's own ``metrics.json``.
+
+    Args:
+        sample: The sample.
+        seed_dir: The run.
+
+    Returns:
+        Training spot id to the ids of its cells.
+    """
+
+    from hedest.dataset_utils import pp_prop
+    from hedest.dataset_utils import split_data
+
+    with open(seed_dir / "metrics.json") as handle:
+        metrics = json.load(handle)
+    train, *_ = split_data(
+        spot_dict(sample),
+        pp_prop(str(sample.proportions_path)),
+        train_size=metrics["params"]["train_size"],
+        val_size=metrics["params"]["val_size"],
+        rs=metrics["seed"],
+    )
+
+    return train
+
+
+def seed_run(sample: Sample, seed_dir: Path, adjusted: bool):
+    """
+    One seed as a :class:`~hedest.analysis.loaders.HedestRun`, with its training spots.
+
+    Args:
+        sample: The sample.
+        seed_dir: The run.
+        adjusted: Whether the run reads the PPSA-adjusted predictions rather than the raw ones.
+
+    Returns:
+        The run.
+    """
+
+    from hedest.analysis.loaders import HedestRun
+    from hedest.dataset_utils import pp_prop
+
+    payload = np.load(seed_dir / "predictions.npz", allow_pickle=True)
+    cells = pd.Index(cell_ids(sample), name="cell_id")
+    classes = [str(name) for name in payload["classes"]]
+    raw, ppsa = (pd.DataFrame(payload[key].astype("float64"), index=cells, columns=classes) for key in ("raw", "ppsa"))
+
+    return HedestRun(
+        predictions_raw=raw,
+        predictions_adjusted=ppsa,
+        spot_dict=spot_dict(sample),
+        proportions=pp_prop(str(sample.proportions_path)),
+        params={"source": str(seed_dir), "combination": COMBINATION, "feature": "hoptimus0"},
+        train_spot_dict=train_spot_dict(sample, seed_dir),
+        run_dir=seed_dir,
+        seeds=[int(seed_dir.name[5:])],
+        adjusted=adjusted,
+    )
+
+
+def true_labels(sample: Sample) -> pd.Series:
+    """
+    The ground truth type of every cell: the argmax of ``sim_*_gt.csv``, as the engine scores it.
+
+    Lung's ground truth is soft for 40% of its cells; breast's is one-hot.
+
+    Args:
+        sample: The sample.
+
+    Returns:
+        Cell id to cell type.
+    """
+
+    truth = pd.read_csv(sample.ground_truth_path, index_col=0)
+    truth.index = truth.index.map(str)
+
+    return truth.idxmax(axis=1).rename("cell_type")
 
 
 def load_run(sample: Sample):
@@ -249,7 +376,7 @@ def load_run(sample: Sample):
             "feature": "hoptimus0",
             "predictions": "raw, mean over seeds",
         },
-        n_seeds=len(sorted((sample.unit_dir / COMBINATION).glob("seed_*"))),
+        n_seeds=len(seed_dirs(sample)),
         adjusted=False,
     )
 
@@ -304,4 +431,9 @@ __all__ = [
     "load_analyzer",
     "load_run",
     "mean_raw_predictions",
+    "seed_dirs",
+    "seed_run",
+    "spot_dict",
+    "train_spot_dict",
+    "true_labels",
 ]

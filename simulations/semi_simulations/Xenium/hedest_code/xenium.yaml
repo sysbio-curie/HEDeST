@@ -1,0 +1,66 @@
+# HEDeST on the two Xenium semi-simulations, Lung and Breast: the article's runs.
+#
+# The gridsearch (gridsearch/semi_sim.yaml) trained these two datasets with every combination
+# and three seeds. This trains the combination it elected, with ten seeds, so that the figures of
+# ../plots.py and ../performance.py carry the same 95% CI over ten seeds as the rest of the
+# article. The inputs are the gridsearch's own, block for block; only the H-Optimus-0 features
+# are kept.
+#
+#   python ../../../gridsearch/gridsearch.py check hedest_code/xenium.yaml
+#   sbatch hedest_code/hedest_array.sh                                       # train
+#   python ../../../gridsearch/gridsearch.py collect hedest_code/xenium.yaml
+#   python plots.py && python performance.py                                 # figures
+#
+# Relative paths are relative to this file.
+
+out_dir: ../hedest_models        # {feature}/{dataset}/{level}/{combination}/seed_{seed}/
+results_dir: ../hedest_results   # runs.csv
+plots_dir: ../figures
+
+# The combination the gridsearch elected for hoptimus0 (best mean rank over every dataset,
+# ranked without PPSA). Listing one value per key trains exactly it; the key order is what
+# names the folder, so it comes out as norm1_do0_a0.01_lr0.0001_l2_hd1024-512, the gridsearch's
+# own name for it.
+grid:
+  norm: [true]
+  dropout: [0.0]
+  alpha: [0.01]
+  lr: [0.0001]
+  divergence: [l2]
+  hidden_dims: [[1024, 512]]
+
+fixed:
+  batch_size: 64
+  beta: 0.0
+  adjustment: interpolated
+  gated: false
+  epochs: 100
+  train_size: 0.8
+  val_size: 0.1
+
+seeds: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+
+# float32, not the gridsearch's float16: the PR curves rank every cell by its probability, and
+# float16 would tie thousands of them.
+predictions: float32
+
+plots:
+  combination: {hoptimus0: norm1_do0_a0.01_lr0.0001_l2_hd1024-512}
+
+templates:
+  xenium: &xenium
+    group: Xenium
+    levels: [single]
+    features:
+      hoptimus0: "{root}/hoptimus_tile_embed_{code}.pt"
+    proportions: "{root}/sim_{sample}_prop_real.csv"
+    spot_dict: "{root}/spot_dict_real.json"
+    adata: "{root}/pseudo_adata_real.h5ad"
+    adata_name: "{sample}"
+    segmentation: "{root}/pannuke_fast_mask_lvl3_annotated.json"
+    ground_truth:
+      path: "{root}/sim_{sample}_gt.csv"
+
+datasets:
+  - {<<: *xenium, name: xenium_lung, root: /cluster/CBIO/data1/lgortana/Xenium_V1_humanLung_Cancer_FFPE/sim/LuCA, sample: Xenium_V1_humanLung_Cancer_FFPE, code: HL}
+  - {<<: *xenium, name: xenium_breast, root: /cluster/CBIO/data1/lgortana/Xenium_FFPE_Human_Breast_Cancer_Rep1/sim, sample: Xenium_FFPE_Human_Breast_Cancer_Rep1, code: HB}
