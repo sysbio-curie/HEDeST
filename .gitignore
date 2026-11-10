@@ -37,6 +37,8 @@ simulations/semi_simulations/VisiumHD/hedest_models
 simulations/semi_simulations/VisiumHD/hedest_results
 simulations/semi_simulations/VisiumHD/perturbed_proportions
 simulations/semi_simulations/Xenium/figures
+simulations/semi_simulations/Xenium/hedest_models
+simulations/semi_simulations/Xenium/hedest_results
 
 debug.log
 run_*
