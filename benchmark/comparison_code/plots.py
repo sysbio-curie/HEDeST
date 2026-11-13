@@ -3,8 +3,9 @@
 Reads the tables of ``collect.py`` and writes, in ``plots/{config}/``:
 
     accuracy_by_level     one panel per sample, balanced accuracy against the annotation level
-    accuracy_overview     every method averaged over the sample-levels, with the spread
-    ranking               mean rank of each method across the sample-levels
+    accuracy_overview     every method averaged over the sample-levels, with the spread and
+                          paired t-tests over the samples (``overview_tests_{config}.csv``)
+    ranking              mean rank of each method across the sample-levels
     gain_over_best_rival  HEDeST + PPSA minus the better of HistoCell and PanoSpace
 
 Every figure is png + svg, with the 3 seeds as a 95% confidence interval.
@@ -16,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 from collections.abc import Sequence
 
 import matplotlib
@@ -27,6 +29,13 @@ import pandas as pd  # noqa: E402
 from matplotlib.lines import Line2D  # noqa: E402
 
 import config as C  # noqa: E402
+
+sys.path.insert(0, C.REPO)
+
+from benchmark.utils import format_p  # noqa: E402
+from benchmark.utils import paired_t_test  # noqa: E402
+
+TESTED = [("HEDeST", "PanoSpace"), ("HEDeST + PPSA", "HEDeST")]  # (a, b) pairs tested on the overview
 
 
 def save_fig(fig: plt.Figure, stem: str, dpi: int = 200) -> None:
@@ -117,7 +126,30 @@ def plot_by_level(summary: pd.DataFrame, stem: str, title: str) -> None:
     save_fig(fig, stem)
 
 
-def plot_overview(summary: pd.DataFrame, stem: str, title: str) -> None:
+def sample_tests(metrics: pd.DataFrame) -> pd.DataFrame:
+    """
+    Paired t-tests of the :data:`TESTED` pairs over the samples, with a Wilcoxon check.
+
+    The levels of a sample annotate the same cells, so their scores move together and are not
+    independent datasets: each method is averaged over the seeds, then over the levels of each
+    sample, and the two methods are compared sample by sample.
+
+    Args:
+        metrics: The per-seed scores of one configuration (``metrics_{config}.csv``).
+
+    Returns:
+        One row per pair: ``a``, ``b`` and the output of :func:`benchmark.utils.paired_t_test`.
+    """
+
+    per_level = metrics.pivot_table(index=["sample", "level"], columns="method", values="balanced_accuracy").dropna()
+    per_sample = per_level.groupby(level="sample").mean()
+    rows = [
+        {"a": a, "b": b, **paired_t_test(per_sample[a], per_sample[b])} for a, b in TESTED if {a, b} <= set(per_sample)
+    ]
+    return pd.DataFrame(rows)
+
+
+def plot_overview(summary: pd.DataFrame, stem: str, title: str, tests: pd.DataFrame | None = None) -> None:
     """
     Every method averaged over the sample-levels, with each sample-level drawn behind the bar.
 
@@ -125,6 +157,7 @@ def plot_overview(summary: pd.DataFrame, stem: str, title: str) -> None:
         summary: The per-method summary of one configuration.
         stem: Path without extension.
         title: Figure title.
+        tests: Output of :func:`sample_tests`; each pair gets a bracket with its P value.
     """
 
     methods = [m for m in C.METHODS if m in set(summary["method"])]
@@ -139,12 +172,24 @@ def plot_overview(summary: pd.DataFrame, stem: str, title: str) -> None:
         ax.scatter(i + jitter, wide[method], s=11, color="0.25", alpha=0.55, zorder=3, linewidths=0)
         ax.text(i, means[method] + 0.02, f"{means[method]:.3f}", ha="center", fontsize=9)
 
+    title = f"{title}\nbar = mean over the {len(wide)} sample-levels, dots = one sample-level"
+    if tests is not None and len(tests):
+        for k, row in enumerate(tests.itertuples()):
+            if row.a not in methods or row.b not in methods:
+                continue
+            x0, x1 = sorted(methods.index(m) for m in (row.a, row.b))
+            y = 1.0 + 0.09 * k  # stacked: the pairs share the HEDeST bar
+            ax.plot([x0, x0, x1, x1], [y, y + 0.015, y + 0.015, y], color="black", lw=1)
+            ax.text((x0 + x1) / 2, y + 0.022, format_p(row.p), ha="center", va="bottom", fontsize=8)
+        title += f"\nP, two-sided paired t-test over the {int(tests['n'].max())} samples (seeds and levels averaged)"
+
     ax.set_xticks(range(len(methods)))
     ax.set_xticklabels(methods, fontsize=9)
     ax.set_ylabel("balanced accuracy")
-    ax.set_ylim(0, 1.05)
-    ax.set_title(f"{title}\nbar = mean over the {len(wide)} sample-levels, dots = one sample-level", fontsize=10)
+    ax.set_ylim(0, 1.05 if tests is None else 1.18)
+    ax.set_title(title, fontsize=10)
     _grid(ax)
+    ax.set_yticks(np.round(np.arange(0, 1.01, 0.1), 1))  # no ticks beside the brackets
     save_fig(fig, stem)
 
 
@@ -306,9 +351,11 @@ def main() -> None:
         out = os.path.join(args.plot_dir, config, "overview")
         label = f"STHELAR, {C.CONFIGS[config]} (3 seeds, 95% CI)"
         n_units = summary[["sample", "level"]].drop_duplicates().shape[0]
+        tests = sample_tests(pd.read_csv(os.path.join(args.result_dir, f"metrics_{config}.csv")))
+        tests.to_csv(os.path.join(args.result_dir, f"overview_tests_{config}.csv"), index=False)
 
         plot_by_level(summary, os.path.join(out, "accuracy_by_level"), label)
-        plot_overview(summary, os.path.join(out, "accuracy_overview"), label)
+        plot_overview(summary, os.path.join(out, "accuracy_overview"), label, tests)
         plot_ranking(summary, os.path.join(out, "ranking"), label)
         plot_gain(summary, os.path.join(out, "gain_over_best_rival"), label)
         per_sample = plot_per_sample(summary, os.path.join(args.plot_dir, config, "per_sample"), label)
