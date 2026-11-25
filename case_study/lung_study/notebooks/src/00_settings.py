@@ -1,7 +1,7 @@
 # %% [markdown]
 # # 0. Settings: which level, which proportions, PPSA or not
 #
-# Every LungScape slide has 20 HEDeST runs: 5 annotation levels (lv1 4 types, lv2 7, lv3 12,
+# Every slide has 20 HEDeST runs: 5 annotation levels (lv1 4 types, lv2 7, lv3 12,
 # lv4 14, lv5 21) × 2 proportion files (raw, or 10pct_filter: types below 10% of a spot set to
 # 0) × with or without PPSA (the predictions rescaled by each cell's local spot composition).
 # lv1 and lv2 are too coarse for immune cells (lv2 has one "immune_lymphoid" class). This
@@ -20,6 +20,10 @@
 from __future__ import annotations
 
 {{SETUP}}
+
+{{INPUTS}}
+
+# %%
 import itertools
 import pickle
 
@@ -37,7 +41,7 @@ UNITS = [(lv, kind) for lv in ("lv3", "lv4", "lv5") for kind in ("10pct_filter",
 
 
 def info(sample, level, kind):
-    """The 5 seeds combined (mean predictions with and without PPSA) of one LungScape run."""
+    """The 5 seeds combined (mean predictions with and without PPSA) of one run."""
 
     with open(paths.sample(sample).run_dir(level, kind) / "info_aggregated.pickle", "rb") as handle:
         return pickle.load(handle)
@@ -51,12 +55,13 @@ def raw_proportions(sample, level):
 # %% [markdown]
 # ## 0.1 Fit to the deconvolution and seed agreement, per level and proportions
 #
-# From LungScape's summary (`hedest_summary.csv`): the Pearson correlation between the mean HEDeST
+# From the summary of the runs (`hedest_summary.csv`): the Pearson correlation between the mean HEDeST
 # prediction of each held-out spot and its proportions (spots never seen in training), and the seed
 # agreement. All units fit well (r ≥ 0.8 on held-out spots for lv3 / lv4).
 
 # %%
 summary = pd.read_csv(paths.DATA_DIR / "hedest_summary.csv")
+summary["sample"] = summary["sample"].map({paths.slide_id(s): s for s in SAMPLES})
 summary = summary[
     summary["sample"].isin(SAMPLES)
     & summary["level"].isin(["lv2", "lv3", "lv4", "lv5"])

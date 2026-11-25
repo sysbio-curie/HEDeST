@@ -35,6 +35,10 @@
 from __future__ import annotations
 
 {{SETUP}}
+
+{{INPUTS}}
+
+# %%
 from lungstudy import coloc as C
 from lungstudy import figures as F
 

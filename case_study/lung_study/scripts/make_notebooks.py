@@ -3,7 +3,8 @@ Builds the notebooks from their sources in ``notebooks/src`` (percent format: ``
 a code cell, ``# %% [markdown]`` a markdown cell whose lines start with ``# ``).
 
 ``00_precheck.py`` is a template, instantiated once per sample ({{SAMPLE}}); every other source
-gives one notebook of the same name.
+gives one notebook of the same name. ``_setup.txt`` ({{SETUP}}) and ``_inputs.txt`` ({{INPUTS}}, where
+the inputs are read from) are shared by all of them.
 
 Usage: python scripts/make_notebooks.py [name ...]
 """
@@ -57,8 +58,9 @@ def write(name: str, text: str) -> Path:
 if __name__ == "__main__":
     wanted = sys.argv[1:]
     setup = (SOURCES / "_setup.txt").read_text().strip("\n")
+    inputs = (SOURCES / "_inputs.txt").read_text().strip("\n")
     for source in sorted(SOURCES.glob("*.py")):
-        text = source.read_text().replace("{{SETUP}}", setup)
+        text = source.read_text().replace("{{SETUP}}", setup).replace("{{INPUTS}}", inputs)
         if source.stem == "00_precheck":
             for sample in SAMPLES:
                 name = f"00_precheck_{sample}"

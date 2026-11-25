@@ -4,8 +4,7 @@
 # Before comparing HEDeST with the deconvolution, this notebook checks that the HEDeST cell
 # types of this slide are sensible: composition, fit to the deconvolution, agreement between
 # seeds, cell types over the whole slide and in zooms, galleries of cells per type, nucleus
-# shapes and neighbourhoods. It follows LungScape's `notebooks/sample_analysis.ipynb`, with
-# the settings of the case study:
+# shapes and neighbourhoods, with the settings of the case study:
 #
 # | setting | value |
 # |---|---|
@@ -60,6 +59,9 @@ def save(fig, name):
 
 display(Markdown(f"**{SAMPLE}**: {paths.ROLES[SAMPLE]}"))
 
+
+{{INPUTS}}
+
 # %% [markdown]
 # ## Loading
 #
@@ -81,14 +83,15 @@ run = load_run(run_dir, adjusted=False)
 ensemble = load_ensemble(run_dir, adjusted=False)
 run.agreement = ensemble.agreement()
 
-adata = sc.read_h5ad(data.meta["adata"])
-image_dict = torch.load(data.meta["image_dict"])
+inputs = paths.sample(SAMPLE)
+adata = sc.read_h5ad(inputs.adata)
+image_dict = torch.load(inputs.image_dict)
 analyzer = PredAnalyzer(
     run,
     seg=data.seg_dict(),
-    slide_path=data.meta["slide"],
+    slide_path=str(inputs.slide),
     adata=adata,
-    adata_name=data.meta["adata_name"],
+    adata_name=list(adata.uns["spatial"])[0],
     image_dict=image_dict,
     mpp=data.mpp,
     palette=style.palette(data.ct),
@@ -198,6 +201,7 @@ save(ensemble.plot_abundance_across_seeds(palette=style.palette(data.ct)), "abun
 
 # %%
 viz = analyzer.visualizer()
+viz.adata_name = SAMPLE  # the default titles name the slide by its AnnData key
 extent = views.slide_extent(data)
 save(ensemble.plot_agreement_map(viz, window=(extent[0], extent[1]), figsize=(11, 11)), "seed_agreement_map")
 

@@ -18,6 +18,7 @@ case_study/lung_study/figures
 case_study/lung_study/notebooks/*.ipynb
 case_study/lung_study/qupath
 case_study/lung_study/results
+case_study/lung_study/sample_ids.json
 external/CellViT/docs
 external/CellViT/examples
 external/HistoCell-v0

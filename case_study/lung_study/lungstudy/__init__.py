@@ -1,10 +1,10 @@
 """
-LungScape case study: what HEDeST shows that the deconvolution proportions cannot.
+mNSCLC case study: what HEDeST shows that the deconvolution proportions cannot.
 
 Modules:
 
 - :mod:`lungstudy.paths` — the samples, the settings and where every file lives;
-- :mod:`lungstudy.cache` — per-sample tables extracted once from the LungScape outputs
+- :mod:`lungstudy.cache` — per-sample tables extracted once from the inputs
   (cells, predictions at every level, spots, per-seed spot predictions, touching cells,
   marker genes);
 - :mod:`lungstudy.style` — one colour per cell type, shared by pies and cells;

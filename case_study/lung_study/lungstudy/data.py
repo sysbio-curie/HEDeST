@@ -1,7 +1,7 @@
 """
 Everything about one sample, loaded from the cache, at one level of annotation.
 
-    data = SampleData("mNSCLC_P1")          # lv3, 10pct_filter, HEDeST without PPSA
+    data = SampleData("mNSCLC_P1")           # lv3, 10pct_filter, HEDeST without PPSA
     data.cells        # one row per nucleus, with its HEDeST label, probability, seed agreement
     data.pred         # cells x cell types, mean of the 5 seeds
     data.props        # spots x cell types, the deconvolution HEDeST was trained on
@@ -68,7 +68,7 @@ class SampleData:
     def slide(self):
         from hedest.analysis.postseg import SlideVisualizer
 
-        return SlideVisualizer(self.meta["slide"], mpp=self.mpp)
+        return SlideVisualizer(str(paths.sample(self.name).slide), mpp=self.mpp)
 
     def seg_dict(self) -> dict:
         """The segmentation in the HoVer-Net layout HEDeST's analysis tools take, without reading the JSON."""

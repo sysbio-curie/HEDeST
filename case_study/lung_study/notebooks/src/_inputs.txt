@@ -1,0 +1,12 @@
+# %% [markdown]
+# **Inputs.** The six slides are called mNSCLC_P1 to mNSCLC_P6. Their inputs are read from a data
+# folder holding one folder per slide (and `hedest_summary.csv`). Two ways to point at them:
+# - `USE_ID_MAPPING = True`: the slide folders keep their original names, given by the private ID
+#   mapping `sample_ids.json` (in `case_study/lung_study`, not on git);
+# - `USE_ID_MAPPING = False`: set `DATA_DIR` to a data folder whose slide folders are named
+#   mNSCLC_P1 to mNSCLC_P6, the files in each named after its folder.
+
+# %%
+USE_ID_MAPPING = True
+DATA_DIR = "/cluster/CBIO/data1/lgortana/LungScape_HEDeST"
+paths.use_inputs(DATA_DIR, id_mapping=USE_ID_MAPPING)

@@ -1,8 +1,8 @@
 """
 The samples of the case study, its settings, and where every input and output lives.
 
-All inputs are read from the LungScape HEDeST data folder and never modified; every output
-goes under ``case_study/lung_study``.
+All inputs are read from the data folder (``DATA_DIR``) and never modified; every output goes
+under ``case_study/lung_study``.
 """
 from __future__ import annotations
 
@@ -38,6 +38,31 @@ ROLES = {
     "mNSCLC_P5": "tumour with T cells inside the nests, no lymphoid aggregate",
     "mNSCLC_P6": "lymphoid-rich, many aggregates",
 }
+
+# The inputs of a slide are one folder of DATA_DIR (anndata/, images/, preprocessing/,
+# deconvolution/, hedest_results/), whose files are named after the folder; DATA_DIR also holds
+# hedest_summary.csv. The folders are named after the samples, unless the private ID mapping
+# (SAMPLE_IDS_FILE, not on git: {"mNSCLC_P1": "<original slide name>", ...}) gives their names.
+SAMPLE_IDS_FILE = STUDY_DIR / "sample_ids.json"
+SAMPLE_IDS = json.loads(SAMPLE_IDS_FILE.read_text()) if SAMPLE_IDS_FILE.exists() else {}
+
+
+def use_inputs(data_dir: str | Path = DATA_DIR, id_mapping: bool = True) -> None:
+    """
+    Reads the inputs from ``data_dir``: with the slide folders named by the private ID mapping
+    (``id_mapping``), or named after the samples.
+    """
+
+    global DATA_DIR, SAMPLE_IDS
+    DATA_DIR = Path(data_dir)
+    SAMPLE_IDS = json.loads(SAMPLE_IDS_FILE.read_text()) if id_mapping else {}
+
+
+def slide_id(name: str) -> str:
+    """The name of a sample's folder in DATA_DIR, and of the files in it."""
+
+    return SAMPLE_IDS.get(name, name)
+
 
 METHOD = "cell2location"
 MAIN_LEVEL = "lv3"
@@ -82,17 +107,21 @@ HOVERNET_TYPES = {
 
 @dataclass(frozen=True)
 class SamplePaths:
-    """Where the inputs of one LungScape sample live."""
+    """Where the inputs of one sample live."""
 
     name: str
 
     @property
+    def stem(self) -> str:
+        return slide_id(self.name)
+
+    @property
     def root(self) -> Path:
-        return DATA_DIR / self.name
+        return DATA_DIR / self.stem
 
     @property
     def adata(self) -> Path:
-        return self.root / "anndata" / f"{self.name}_V2_aligned.h5ad"
+        return self.root / "anndata" / f"{self.stem}_V2_aligned.h5ad"
 
     @property
     def slide(self) -> Path:
@@ -109,18 +138,18 @@ class SamplePaths:
 
     @property
     def segmentation(self) -> Path:
-        return self.root / "preprocessing" / "segmentation" / f"{self.name}.json"
+        return self.root / "preprocessing" / "segmentation" / f"{self.stem}.json"
 
     @property
     def image_dict(self) -> Path:
-        return self.root / "preprocessing" / "image_dict" / f"{self.name}_64px_20um.pt"
+        return self.root / "preprocessing" / "image_dict" / f"{self.stem}_64px_20um.pt"
 
     @property
     def mask(self) -> Path:
-        return self.root / "preprocessing" / "mask" / f"{self.name}.png"
+        return self.root / "preprocessing" / "mask" / f"{self.stem}.png"
 
     def proportions(self, level: str = MAIN_LEVEL, kind: str = PROPORTIONS) -> Path:
-        return self.root / "deconvolution" / METHOD / level / PROPORTION_FILES[kind].format(sample=self.name)
+        return self.root / "deconvolution" / METHOD / level / PROPORTION_FILES[kind].format(sample=self.stem)
 
     def run_dir(self, level: str = MAIN_LEVEL, kind: str = PROPORTIONS) -> Path:
         return self.root / "hedest_results" / METHOD / level / kind / RUN_NAME

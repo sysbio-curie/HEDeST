@@ -40,6 +40,10 @@
 from __future__ import annotations
 
 {{SETUP}}
+
+{{INPUTS}}
+
+# %%
 import json
 
 import shapely

@@ -26,6 +26,10 @@
 from __future__ import annotations
 
 {{SETUP}}
+
+{{INPUTS}}
+
+# %%
 from scipy.spatial import cKDTree
 
 from lungstudy import figures as F

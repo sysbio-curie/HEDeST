@@ -1,5 +1,5 @@
 """
-Per-sample tables extracted once from the LungScape outputs, so the notebooks load in seconds.
+Per-sample tables extracted once from the inputs, so the notebooks load in seconds.
 
 ``build(sample)`` reads the segmentation (hundreds of MB of JSON), the AnnData, the HEDeST
 seed runs of every level and the proportion files, and writes under ``cache/<sample>/``:
@@ -17,7 +17,8 @@ seed runs of every level and the proportion files, and writes under ``cache/<sam
 - ``contacts.npy``: the pairs of touching cells (see :mod:`lungstudy.contacts`);
 - ``markers.pkl``: raw counts of the TLS marker genes per spot, and each spot's total counts
   (see :mod:`lungstudy.markers`);
-- ``meta.json``: mpp, spot diameter and pitch in pixels, the input paths.
+- ``meta.json``: mpp, spot diameter and pitch in pixels, numbers of cells and spots (the input
+  paths come from :mod:`lungstudy.paths`).
 
 Every part is built only when missing, so adding a level or a table does not rebuild the rest.
 """
@@ -110,7 +111,7 @@ def _build_base(name: str) -> None:
     out = sample.cache()
     mpp = sample.mpp
 
-    logger.info(f"{name}: reading {sample.segmentation}")
+    logger.info(f"{name}: reading the segmentation")
     with open(sample.segmentation) as handle:
         nuc = json.load(handle)["nuc"]
     cell_ids = list(nuc)
@@ -172,11 +173,6 @@ def _build_base(name: str) -> None:
         "spot_diameter_px": float(geometry.diameter),
         "spot_pitch_px": pitch_px,
         "spot_pitch_um": pitch_px * mpp,
-        "slide": str(sample.slide),
-        "segmentation": str(sample.segmentation),
-        "image_dict": str(sample.image_dict),
-        "adata": str(sample.adata),
-        "adata_name": adata_name,
         "n_cells": int(len(cells)),
         "n_spots": int(len(spots)),
     }
@@ -195,7 +191,7 @@ def _build_unit(name: str, level: str, kind: str) -> None:
     out = sample.cache()
     key = unit_key(level, kind)
     run_dir = sample.run_dir(level, kind)
-    logger.info(f"{name}: {key} from {run_dir}")
+    logger.info(f"{name}: {key} from the run {level}/{kind}/{paths.RUN_NAME}")
     index = cells(name).index
     runs = load_seed_runs(run_dir, adjusted=False)
     if len(runs) != len(paths.SEEDS):
