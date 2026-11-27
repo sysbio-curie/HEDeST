@@ -9,7 +9,7 @@ Two figures per sample, the same two for lung and for breast:
   the cells of that type are coloured and the rest are left grey. Reading the row left to
   right therefore compares what the spots asked for with what HEDeST put inside them.
 * ``{sample}_celltype_gallery`` -- the nucleus crops of the cells predicted for each type,
-  the most confident first, through :func:`hedest.analysis.plots.plot_gallery`.
+  through :func:`hedest.analysis.plots.plot_gallery`.
 
 and one ``article_page`` figure that stacks all four at their real size inside the outline of
 a journal page, to check they fit the space they are meant for.
@@ -391,8 +391,7 @@ def celltype_gallery(
     """
     The nucleus crops of the cells predicted for each cell type, one block per type.
 
-    The blocks hold the cells the model is most confident about, which is the selection
-    :meth:`PredAnalyzer.plot_celltype_grid` makes. That method is not called directly because
+    `PredAnalyzer.plot_celltype_grid` is not called directly because
     it forwards neither the gap between blocks nor the label size, and both have to be set
     here: at its defaults a row of seven blocks is 214 mm wide, past the width of a page.
     :func:`hedest.analysis.plots.plot_gallery` takes them, so the crop size can be solved for

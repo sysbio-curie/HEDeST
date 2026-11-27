@@ -322,8 +322,6 @@ CROP_WINDOWS: Dict[str, dict] = {
     "deconv": {"sample": "prostate_s0", "level": "level3", "windows": _PROSTATE_WINDOWS},
 }
 
-# Per-sample crop figures: this many windows of this side, taken where the nuclei are
-# densest (see views.dense_windows), the same ones at every level of the sample.
 CROP_SIZE = 1500
 CROPS_PER_SAMPLE = 3
 

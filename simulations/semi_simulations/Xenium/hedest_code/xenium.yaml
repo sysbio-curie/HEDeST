@@ -17,7 +17,7 @@ out_dir: ../hedest_models        # {feature}/{dataset}/{level}/{combination}/see
 results_dir: ../hedest_results   # runs.csv
 plots_dir: ../figures
 
-# The combination the gridsearch elected for hoptimus0 (best mean rank over every dataset,
+# The combination the gridsearch elected for hoptimus0 (best mean rank,
 # ranked without PPSA). Listing one value per key trains exactly it; the key order is what
 # names the folder, so it comes out as norm1_do0_a0.01_lr0.0001_l2_hd1024-512, the gridsearch's
 # own name for it.

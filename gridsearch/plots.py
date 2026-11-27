@@ -31,7 +31,7 @@ every dataset (confusion, ppsa_*):
 and ``{plots_dir}/features.png`` comparing the feature types (each with its selected
 combination) on the datasets they share.
 
-The selected combination is the best mean rank over all datasets without PPSA
+The selected combination is the best mean rank without PPSA
 (``plots: {select: ppsa}`` elects it with PPSA, ``plots: {combination: {feature: name}}``
 imposes it). Every bar of a dataset in the confusion and ppsa_* figures comes from the
 same runs, the seeds of that combination.
@@ -261,8 +261,8 @@ def rank_stats(sub: pd.DataFrame, keys: List[str], metric: str, alpha: float = 0
 
 def select_combination(sm: pd.DataFrame, keys: List[str], feature: str, cfg: dict) -> dict:
     """
-    The combination analysed on every dataset (confusion and ppsa_* figures): the best mean
-    rank over all the datasets of the feature type, without PPSA unless ``plots: {select:
+    The combination analysed (confusion and ppsa_* figures): the best mean
+    rank of the feature type, without PPSA unless ``plots: {select:
     ppsa}``, or the one given in ``plots: {combination: {feature: name}}``.
     """
 

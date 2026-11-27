@@ -19,9 +19,6 @@
 # can include normal epithelium.
 #
 # **Slides**: mNSCLC_P1, mNSCLC_P2, mNSCLC_P3 (`paths.ANALYSIS_SAMPLES`).
-#
-# Every claim below comes with its deconvolution counterpart and with H&E crops chosen by stated
-# rules.
 # %%
 from __future__ import annotations
 
@@ -238,13 +235,6 @@ for sample, d in data.items():
     )
     table.to_csv(paths.result_path(f"infiltration_deep_spots_{sample}.csv"))
 pd.DataFrame(rows).set_index("sample").round(3)
-
-# %% [markdown]
-# **On the H&E** (by rule): on each slide, the two hidden spots with the most HEDeST T cells deeper
-# than 20 µm in their hexagon, those where the raw deconvolution also says ≤ 5% T first, at least
-# 1 mm apart. 200 µm windows: H&E, the filtered deconvolution (HEDeST's input) and the HEDeST
-# cells, with the spot drawn as a thick circle. As in 3.3 the compartment border is left out at
-# this zoom; it is on the overviews of 3.1.
 
 # %%
 for sample, d in data.items():

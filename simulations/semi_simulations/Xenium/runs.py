@@ -16,7 +16,7 @@ Two things make that wrapping necessary rather than optional:
   train/val/test split of a seed is not saved: :func:`train_spot_dict` recomputes it, as the
   engine drew it.
 
-The combination is the one the gridsearch elected for H-Optimus-0 features over all datasets
+The combination is the one the gridsearch elected for H-Optimus-0 features
 (``gridsearch/results/semi_sim/selected.csv``, "best mean rank over all datasets without
 PPSA"). :func:`load_run` gives the **raw** predictions averaged over the ten seeds, for the
 slide figures; :func:`seed_run` gives one seed, raw or PPSA-adjusted, for the performance

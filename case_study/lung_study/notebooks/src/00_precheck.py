@@ -228,9 +228,6 @@ save(views.type_maps(data, shown, panel_size=4.6), "type_maps")
 
 # %% [markdown]
 # ## Zooms
-#
-# Places picked from the deconvolution alone (see `pick_sites`), each shown at 350 µm as
-# H&E with the spots | the deconvolution pies | the HEDeST cells, then as a series of zooms.
 
 # %%
 sites = pick_sites(data)
@@ -280,9 +277,6 @@ for name in ("busiest", "lymphoid", "interface"):
 
 # %% [markdown]
 # ## Cell galleries
-#
-# The most confident cells of each predicted type, then a random sample of each type (the
-# honest view).
 
 # %%
 save(analyzer.plot_celltype_grid(num_rows=4, num_cols=6), "gallery_max")

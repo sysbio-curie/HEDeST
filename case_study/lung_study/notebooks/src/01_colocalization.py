@@ -122,19 +122,6 @@ scores.loc[
 
 # %% [markdown]
 # ## 1.2 What the disagreements look like on the H&E
-#
-# **Which pairs** (by rule): the robust disagreements a deconvolution study would get wrong
-# and that involve an immune type: the spots say "together" (co-occurrence ≥ 0) and the cells
-# say less, or the cells touch more than the spots say. "Opposite" pairs first, then by the size
-# of the gap; at most two pairs per slide.
-#
-# **Which places** (never by eye): windows of 220 µm with at least 20 cells of each type (10 on a
-# slide where no pair has such a window), at least 1 mm apart. For "apart" pairs (HEDeST less
-# than the spots): windows centred on the spots where the deconvolution gives both types ≥ 15%
-# (the spots say "together"), the two with the most contacts *missing* compared with random
-# mixing of the window's cells. For "together" pairs: windows centred on touching A–B pairs, the
-# two with the most contacts *in excess* of random mixing. Each row: H&E alone, the deconvolution
-# pies, and the HEDeST cells of the two types with every touching pair drawn in black.
 
 # %%
 IMMUNE = {"B cell", "T cell", "macrophage"}

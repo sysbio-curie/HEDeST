@@ -19,7 +19,7 @@
 HEDeST uses two conda environments: **hedest-env** for the pipeline, the feature extraction, the model and the analysis, and **hovernet-env** for the tissue mask and the nuclei segmentation. HoVer-Net is kept apart because it needs Python 3.8 and its own torch build; the pipeline simply calls it as a subprocess.
 
 ```
-git clone git@github.com:lucagortana/HEDeST.git
+git clone https://github.com/sysbio-curie/HEDeST.git
 cd HEDeST
 ./setup_env.sh
 ```
@@ -63,6 +63,31 @@ Three precautions are worth knowing:
 
 Nothing has to be configured for any of this: ``hedest/features/hoptimus.py`` tries the cache, then the hub.
 
+## Tutorial
+
+This tutorial runs HEDeST on the public 10x Visium section *Human Breast Cancer: Ductal Carcinoma In Situ, Invasive Carcinoma (FFPE)*, with the spot proportions of ``case_study/breast_study/DestVI_BRCA_prop.csv`` (a DestVI deconvolution of this section), and then analyses the result. It needs the installation and the model weights above, and a GPU.
+
+**1. Download the data** into a folder of your choice:
+```
+mkdir Visium_FFPE_Human_Breast_Cancer && cd Visium_FFPE_Human_Breast_Cancer
+URL=https://cf.10xgenomics.com/samples/spatial-exp/1.3.0/Visium_FFPE_Human_Breast_Cancer
+wget $URL/Visium_FFPE_Human_Breast_Cancer_image.tif
+wget $URL/Visium_FFPE_Human_Breast_Cancer_spatial.tar.gz && tar -xzf Visium_FFPE_Human_Breast_Cancer_spatial.tar.gz
+wget -O filtered_feature_bc_matrix.h5 $URL/Visium_FFPE_Human_Breast_Cancer_filtered_feature_bc_matrix.h5
+```
+
+**2. Edit the configuration**, ``case_study/breast_study/tutorial.yaml``: the lines marked ``edit`` take the data folder, the hovernet-env interpreter and the HoVer-Net checkpoint.
+
+**3. Run the pipeline** from the repository root, in hedest-env:
+```
+python hedest/pipeline.py run case_study/breast_study/tutorial.yaml
+```
+It converts the slide to a pyramidal TIFF, computes the tissue mask, segments the nuclei, extracts their embeddings, and trains HEDeST with 5 seeds, whose predictions are averaged. Everything is written to ``hedest/`` in the data folder. It takes about 40 minutes on an NVIDIA P100 GPU.
+
+**4. Look at the results.**
+- In QuPath: open ``hedest/slide/Visium_FFPE_Human_Breast_Cancer_image_pyramidal.tif`` and drag ``hedest/model/hedest_predictions_aggregated_adj.geojson`` and ``hedest/model/spot_pies.geojson`` onto it (see [In QuPath](#in-qupath)).
+- In Python: open ``case_study/breast_study/DCIS_study.ipynb`` from its folder, replace the paths at the top of its first code cell with the files of your run (each comment says which file), and run it. It shows the cell-type composition, the agreement with the deconvolution, galleries of cells, and the neighbourhoods and niches of the cells.
+
 ## Code structure
 The code is structured as follows :
 ```
@@ -74,22 +99,24 @@ hedest/              → Source code for HEDeST and analysis tools
   spots.py           → Spot geometry, cell-to-spot mapping and spot pies for QuPath
   aggregate_seeds.py → Combines the seeds of one study
   analysis/          → Visualization and analysis of the predictions
+case_study/          → The breast (tutorial) and lung case studies
 gridsearch/          → Parameter gridsearch against ground truth cell types
-benchmark/           → Benchmarking notebooks
-case_study/          → Notebook for the case study (tutorial)
+benchmark/           → Comparison with other methods
+simulations/         → Full simulations, and the analysis of the semi-simulated datasets
 external/            → External tools (some modified for HEDeST)
-simulations/         → Code for generating and analyzing simulated data
 
 setup_env.sh              → Creates the two conda environments
 requirements.txt          → hedest-env (pipeline, features, model, analysis)
 requirements-hovernet.txt → hovernet-env (mask, segmentation)
 ```
 
+The semi-simulated datasets (STHELAR, Visium HD, Xenium) are built by a separate repository, [HEDeST-simdata](https://github.com/lucagortana/HEDeST-simdata).
+
 ## Usage
 
 ![figure](references/method.png)
 
-To use HEDeST, you need an H&E slide (pyramidal .tif) and a CSV file with the cell-type proportions per spatial transcriptomics spot. Everything else is produced by the pipeline: tissue mask → nuclei segmentation → cell embeddings → cell types.
+To use HEDeST, you need three inputs: an H&E slide, the spatial transcriptomics data of the same section (the Space Ranger output folder, or an AnnData), which gives the spot positions, and a CSV file with the cell-type proportions of each spot (one row per spot barcode, one column per cell type). Everything else is produced by the pipeline: tissue mask → nuclei segmentation → cell embeddings → cell types.
 
 ### Full pipeline
 
@@ -197,24 +224,6 @@ Any matplotlib colour works, the cell types you leave out keep their default col
 
 With ``--save-geojson``, a run writes its cells with their predicted type (``hedest_predictions_adj.geojson``, and ``hedest_predictions_aggregated_adj.geojson`` for an aggregate): drag it onto the slide. With ``--save-spot-pies`` (``train.save_spot_pies`` in the pipeline, which writes a single file whatever the number of seeds, or ``hedest.spots.export_spot_pies`` from Python at any time, no model needed), ``spot_pies.geojson`` draws every spot at its centre with its real diameter, as a pie of the proportions HEDeST is trained on, with the colours of the cells (give the same ``--color-dict-file`` to both if you use one). Load the two files together to switch between the two scales: the cells are *detections* and the wedges *annotations*, so ``D`` shows or hides the cells, ``A`` the pies, ``F`` and ``Shift+F`` fill them. The wedges are locked; each one holds its proportion as a measurement and its spot barcode as metadata.
 
-## Tutorial
-
-Download the dataset **'Human Breast Cancer: Ductal Carcinoma In Situ, Invasive Carcinoma (FFPE)'**:
-
-```
-wget https://cf.10xgenomics.com/samples/spatial-exp/1.3.0/Visium_FFPE_Human_Breast_Cancer/Visium_FFPE_Human_Breast_Cancer_image.tif
-wget https://cf.10xgenomics.com/samples/spatial-exp/1.3.0/Visium_FFPE_Human_Breast_Cancer/Visium_FFPE_Human_Breast_Cancer_spatial.tar.gz
-wget https://cf.10xgenomics.com/samples/spatial-exp/1.3.0/Visium_FFPE_Human_Breast_Cancer/Visium_FFPE_Human_Breast_Cancer_filtered_feature_bc_matrix.h5
-```
-
-Then, create a folder named ``Visium_FFPE_Human_Breast_Cancer``. Inside it, make sure you have a ST folder containing :
-- a **spatial/** folder with low resolution images, scale factors and the list of tissue positions,
-- the file ``filtered_feature_bc_matrix.h5``
-
-You can find the proportion file in the **case_study** directory.
-
-After running preprocessing and training, open the notebook ``case_study/breast_study/DCIS_study.ipynb`` for analysis and visualization. The cell annotations performed by HEDeST can also be visualized in QuPath with the geojson output.
-
 ## Gridsearch
 
 ``gridsearch/`` trains HEDeST for every combination of parameter lists, on several datasets, annotation levels and feature types, and scores each model against ground truth cell types (balanced accuracy, with and without PPSA). A run is exactly what ``hedest/main.py`` trains with the same parameters and seed: it uses the same training and PPSA code, but each dataset is loaded only once for all its runs, with its embeddings kept on the GPU.
@@ -260,17 +269,17 @@ python gridsearch/plots.py              my_gridsearch.yaml          # figures ->
 Each run writes ``best_model.pth``, ``history.png``, ``metrics.json`` (parameters, scores, loss history, confusion matrices) and ``predictions.npz`` (raw and PPSA probabilities) to ``{out_dir}/{feature}/{dataset}/{level}/{combination}/seed_{seed}/``. The figures go in three steps, for each feature type:
 - all the results: the balanced accuracy of every combination (over all datasets, per group of datasets, per number of cell types, and per dataset);
 - the selection: the combinations are ranked two ways, by mean balanced accuracy and by mean rank (ranked within each dataset-level, then averaged, so that every dataset-level weighs the same whatever its number of cell types). The best mean rank is elected with a Friedman test, and each other combination is compared with it (Wilcoxon signed-rank test, Holm correction), which gives the combinations that are not significantly worse (``{results_dir}/ranking_*.csv`` and ``ranking_tests.csv``);
-- the analysis of the selected combination on every dataset: confusion matrices, effect of PPSA (everywhere, inside or outside spots, on the training or test spots) and comparison of the feature types. All the bars of a dataset come from the same runs. The selected combination is the best mean rank over all datasets without PPSA (``plots: {select: ppsa}`` in the YAML to rank with PPSA, ``plots: {combination: {hoptimus0: ...}}`` to choose it), see ``{results_dir}/selected.csv``.
+- the analysis of the selected combination: confusion matrices, effect of PPSA (everywhere, inside or outside spots, on the training or test spots) and comparison of the feature types. All the bars of a dataset come from the same runs. The selected combination is the best mean rank without PPSA (``plots: {select: ppsa}`` in the YAML to rank with PPSA, ``plots: {combination: {hoptimus0: ...}}`` to choose it), see ``{results_dir}/selected.csv``.
 
 ## Some classic errors
-During segmentation, you can get the ``OSError: [Errno 39] Directory not empty: 'cache'`` error. Make sure to delete everything you have in this repository and apply chmod 777. \
-Also, you can get the Openslide's error ``openslide.lowlevel.OpenSlideUnsupportedFormatError: Unsupported or missing image file``. The pipeline detects this and converts the slide for you; ``python hedest/pipeline.py check your_file.tif --convert`` does it on its own. To convert it yourself instead:
+HoVer-Net works in a cache folder (``segmentation.cache_path``, ``cache/`` in the repository by default) and empties it when it starts and when it ends. Two segmentations running at the same time must therefore each have their own ``cache_path``, otherwise they delete each other's files and fail. \
+You can also get the Openslide's error ``openslide.lowlevel.OpenSlideUnsupportedFormatError: Unsupported or missing image file``. The pipeline detects this and converts the slide for you; ``python hedest/pipeline.py check your_file.tif --convert`` does it on its own. To convert it yourself instead:
 ```
 vips tiffsave your_file.tif output-pyramidal.tif --tile --pyramid --bigtiff --compression jpeg --Q 90
 ```
 
 ## Preprint
-https://www.biorxiv.org/content/10.64898/2026.01.06.697922v1
+https://doi.org/10.64898/2026.01.06.697922
 
 ```
 @article{gortana_hedest_2026,

@@ -12,7 +12,7 @@ figures of steps 1 to 3):
   k_series                          balanced accuracy against the number of clusters
   design_6clusters                  base vs dup vs dup_not_mixed, PPSA vs no PPSA tested
   confusion/{sample}                row-normalised confusion, no PPSA | PPSA | difference
-  galleries/{sample}_pred.png       crops grouped by predicted cluster (most confident cells)
+  galleries/{sample}_pred.png       crops grouped by predicted cluster
   galleries/{sample}_gt.png         the same cells grouped by true cluster
 
 "variant" is the model output (``raw``) or the PPSA-adjusted one (``ppsa``); PPSA is applied

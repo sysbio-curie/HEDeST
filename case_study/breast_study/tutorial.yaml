@@ -1,0 +1,25 @@
+# HEDeST on the 10x Visium FFPE human breast cancer section: the tutorial of the README.
+#
+#   python hedest/pipeline.py run case_study/breast_study/tutorial.yaml   # from the repository root
+#
+# Edit the lines marked "edit". /path/to/data is the folder the data was downloaded into.
+# The parameters not given here keep the package defaults, which are those of the article.
+
+slide: /path/to/data/Visium_FFPE_Human_Breast_Cancer_image.tif       # edit
+out_dir: /path/to/data/hedest                                        # edit: everything the run writes
+mpp: 0.3448                                                          # microns per pixel of this slide
+
+mask:
+  python: /path/to/envs/hovernet-env/bin/python                      # edit
+
+segmentation:
+  python: /path/to/envs/hovernet-env/bin/python                      # edit
+  model_path: /path/to/hovernet_fast_pannuke_type_tf2pytorch.tar     # edit
+  image_dict_path: /path/to/data/hedest/cell_crops.pt                # edit: nucleus crops, for the notebook
+
+train:
+  spot_prop_file: case_study/breast_study/DestVI_BRCA_prop.csv       # the DestVI deconvolution of the section
+  path_st_adata: /path/to/data                                       # edit: spatial/ and filtered_feature_bc_matrix.h5
+  rs: [0, 1, 2, 3, 4]                                                # 5 seeds, averaged
+  save_geojson: true                                                 # the cells, for QuPath
+  save_spot_pies: true                                               # the spot proportions, for QuPath

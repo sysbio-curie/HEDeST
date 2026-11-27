@@ -136,8 +136,6 @@ class SampleData:
 
 def pick_sites(data: SampleData, min_cells: int = 8) -> Dict[str, dict]:
     """
-    Picks the places of a slide worth zooming on, from the deconvolution alone.
-
     Returns:
         name -> {"spot", "x", "y", "why"}.
     """

@@ -627,7 +627,7 @@ def plot_galleries(
     capacity = num_rows * num_cols
 
     fig = an.plot_celltype_grid(num_rows=num_rows, num_cols=num_cols, selection="max")
-    fig.suptitle(f"{title} — predicted clusters (most confident cells)", fontsize=10, y=1.02)
+    fig.suptitle(f"{title} — predicted clusters", fontsize=10, y=1.02)
     fig.savefig(f"{stem}_pred.png", dpi=200, bbox_inches="tight")
     plt.close(fig)
 
